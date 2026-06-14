@@ -1,5 +1,4 @@
 import React, { useState, useRef } from 'react';
-import IrisLogoSvg from '../../IrisTextLogoWhite.svg';
 import {
   listProjects, readProject, deleteProject,
   createBlankProject, writeProject,
@@ -94,13 +93,13 @@ export default function ProjectsPage({ onOpen }) {
         background: 'var(--panel-bg-2)',
         display: 'flex',
         alignItems: 'center',
-        padding: '0 32px',
-        height: 56,
+        padding: 0,
+        height: 52,
         flexShrink: 0,
       }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <img src={IrisLogoSvg} alt="IRIS" style={{ width: 26, height: 26 }} />
-          <span style={{ fontFamily: 'Lalezar, sans-serif', fontSize: 18, color: 'var(--text-main)', letterSpacing: '0.04em', lineHeight: 1 }}>IRIS</span>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '0 14px', height: '100%' }}>
+          <img src="/IrisLogo.svg" alt="IRIS" style={{ width: 38, height: 38 }} />
+          <span style={{ fontFamily: 'Lalezar, sans-serif', fontSize: 28, color: 'var(--text-main)', letterSpacing: '0.04em', lineHeight: 1 }}>IRIS</span>
         </div>
       </div>
 

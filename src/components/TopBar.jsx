@@ -1,5 +1,4 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import IrisLogoSvg from '../../IrisTextLogoWhite.svg';
 import useStore from '../store/useStore';
 import { exportGifPackageZip } from '../export/GifPackageExporter';
 import { writeProject, downloadProjectFile, parseProjectFile } from '../projects/projectStore';
@@ -250,7 +249,7 @@ function TopBar({ stageRef, layerRef, onGoHome, onTogglePreview }) {
           flexShrink: 0,
         }}
       >
-        <img src={IrisLogoSvg} alt="IRIS" style={{ width: 38, height: 38, flexShrink: 0 }} />
+        <img src="/IrisLogo.svg" alt="IRIS" style={{ width: 38, height: 38, flexShrink: 0 }} />
         <span style={{
           fontFamily: 'Lalezar, sans-serif',
           fontSize: 28,
