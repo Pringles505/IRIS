@@ -39,7 +39,7 @@ describe('collectPresentationSegments', () => {
     expect(segments[0].end).toBe(2);
     expect(segments[1].start).toBe(2);
     expect(segments[1].end).toBe(5);
-    // Content after the final divider (node c) is intentionally excluded.
+    // Content after the final slide break (node c) is intentionally excluded.
     expect(segments.every(s => s.end <= 5)).toBe(true);
   });
 

@@ -782,9 +782,9 @@ const useStore = create((set, get) => ({
   links: [],
   nextLinkDefaults: { ...LINK_DEFAULTS },
 
-  // Manual GIF dividers (seconds) for presentation export and timeline markers.
-  // Segments are [0 → first], [first → second], etc.; the last divider is
-  // the final export end, so no trailing GIF is created after it.
+  // Manual slide breaks (seconds) for presentation export and timeline markers.
+  // Segments are [0 → first], [first → second], etc.; the last break is
+  // the final export end, so no trailing slide is created after it.
   // Empty list → auto-determine segments from keyframes.
   slideBreaks: [],
 

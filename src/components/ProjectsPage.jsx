@@ -3,8 +3,10 @@ import {
   listProjects, readProject, deleteProject,
   createBlankProject, writeProject,
   downloadProjectFile, parseProjectFile, formatDate,
-  duplicateProject,
+  duplicateProject, listExampleProjects, instantiateExampleProject,
 } from '../projects/projectStore';
+
+const EXAMPLE_PROJECTS = listExampleProjects();
 
 export default function ProjectsPage({ onOpen }) {
   const [projects, setProjects]     = useState(() => listProjects());
@@ -24,6 +26,18 @@ export default function ProjectsPage({ onOpen }) {
   const handleOpen = (meta) => {
     const project = readProject(meta.id);
     if (project) onOpen(project);
+  };
+
+  const handleOpenExample = (example) => {
+    try {
+      const project = instantiateExampleProject(example.path);
+      if (!project) return;
+      writeProject(project);
+      onOpen(project);
+    } catch (err) {
+      setError(err.message);
+      setTimeout(() => setError(null), 4000);
+    }
   };
 
   const handleDelete = (e, meta) => {
@@ -168,6 +182,27 @@ export default function ProjectsPage({ onOpen }) {
             ))}
           </div>
         )}
+
+        {EXAMPLE_PROJECTS.length > 0 && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+            <h2 style={{ fontSize: 16, fontWeight: 700, color: 'var(--text-main)', letterSpacing: '-0.01em' }}>
+              Example Projects
+            </h2>
+            <div style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))',
+              gap: 14,
+            }}>
+              {EXAMPLE_PROJECTS.map(example => (
+                <ExampleCard
+                  key={example.path}
+                  example={example}
+                  onOpen={() => handleOpenExample(example)}
+                />
+              ))}
+            </div>
+          </div>
+        )}
       </div>
 
       <input
@@ -278,6 +313,71 @@ function ProjectCard({
         </span>
         <span style={{ fontSize: 11, color: 'var(--text-faint)' }}>
           {meta.nodeCount} node{meta.nodeCount !== 1 ? 's' : ''} · {meta.linkCount} link{meta.linkCount !== 1 ? 's' : ''}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function ExampleCard({ example, onOpen }) {
+  const [hovered, setHovered] = useState(false);
+
+  return (
+    <div
+      onClick={onOpen}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      title="Opens a copy of this example"
+      style={{
+        background: hovered ? 'var(--panel-bg-3)' : 'var(--panel-bg-2)',
+        border: `1px solid ${hovered ? 'var(--purple-border-soft)' : 'var(--border-strong)'}`,
+        borderRadius: 10,
+        padding: '18px 18px 14px',
+        cursor: 'pointer',
+        transition: 'background 0.12s, border-color 0.12s',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 10,
+      }}
+    >
+      <div style={{
+        height: 90,
+        borderRadius: 6,
+        background: 'var(--app-bg)',
+        border: '1px solid var(--border-soft)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        overflow: 'hidden',
+      }}>
+        {example.preview ? (
+          <img
+            src={example.preview}
+            alt=""
+            style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+          />
+        ) : example.nodeCount > 0 ? (
+          <MiniPreview nodeCount={example.nodeCount} linkCount={example.linkCount} />
+        ) : (
+          <span style={{ color: 'var(--text-faint)', fontSize: 12 }}>Empty</span>
+        )}
+      </div>
+
+      <span style={{
+        fontSize: 13,
+        fontWeight: 600,
+        color: 'var(--text-main)',
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+        whiteSpace: 'nowrap',
+      }}>
+        {example.name}
+      </span>
+
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>Example</span>
+        <span style={{ fontSize: 11, color: 'var(--text-faint)' }}>
+          {example.nodeCount} node{example.nodeCount !== 1 ? 's' : ''} · {example.linkCount} link{example.linkCount !== 1 ? 's' : ''}
         </span>
       </div>
     </div>

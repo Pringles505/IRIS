@@ -114,6 +114,43 @@ export function parseProjectFile(jsonString) {
   };
 }
 
+// Bundled read-only examples from <root>/ExampleProjects. Empty when the folder is absent.
+const EXAMPLE_FILES = import.meta.glob('/ExampleProjects/*.echoproj', {
+  query: '?raw', import: 'default', eager: true,
+});
+
+export function listExampleProjects() {
+  return Object.entries(EXAMPLE_FILES)
+    .map(([path, raw]) => {
+      try {
+        const data = JSON.parse(raw);
+        const fileName = path.split('/').pop().replace(/\.echoproj$/, '');
+        return {
+          path,
+          name: data.name ?? fileName,
+          nodeCount: Array.isArray(data.nodes) ? data.nodes.length : 0,
+          linkCount: Array.isArray(data.links) ? data.links.length : 0,
+          preview: data.preview ?? null,
+        };
+      } catch (err) {
+        console.error(`[projectStore] invalid example project ${path}:`, err);
+        return null;
+      }
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+// Opens an example as a fresh local copy so edits never touch the bundled file
+// and repeated opens don't overwrite each other.
+export function instantiateExampleProject(path) {
+  const raw = EXAMPLE_FILES[path];
+  if (!raw) return null;
+  const project = parseProjectFile(raw);
+  const now = new Date().toISOString();
+  return { ...project, id: uuid(), createdAt: now, updatedAt: now };
+}
+
 export function formatDate(iso) {
   const d = new Date(iso);
   return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });

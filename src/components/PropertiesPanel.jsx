@@ -3312,7 +3312,7 @@ function PanelContent() {
 // arrow tab to tuck it away. Width and collapsed state persist across sessions.
 const PANEL_MIN_WIDTH = 200;
 const PANEL_MAX_WIDTH = 520;
-const PANEL_DEFAULT_WIDTH = 244;
+const PANEL_DEFAULT_WIDTH = 488;
 const PANEL_WIDTH_KEY = 'echovis_props_panel_width';
 const PANEL_COLLAPSED_KEY = 'echovis_props_panel_collapsed';
 // ease-out-expo: fast launch, long smooth settle — the "satisfying" part.

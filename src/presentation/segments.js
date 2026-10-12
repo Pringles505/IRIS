@@ -86,10 +86,10 @@ export function collectPresentationSegments(nodes, links, options = {}) {
     }
   }
 
-  // Manual dividers are authoritative GIF boundaries. The last divider is the
-  // final export end; content after it is intentionally excluded.
+  // Manual slide breaks are authoritative segment boundaries. The last break is
+  // the final export end; content after it is intentionally excluded.
   let breaks;
-  let manualDividerMode = false;
+  let manualBreakMode = false;
   const cleanedManual = Array.isArray(slideBreaks)
     ? [...new Set(slideBreaks
         .map(v => (Number.isFinite(v) ? Math.max(0, r2(v)) : null))
@@ -98,7 +98,7 @@ export function collectPresentationSegments(nodes, links, options = {}) {
     : [];
 
   if (cleanedManual.length) {
-    manualDividerMode = true;
+    manualBreakMode = true;
     breaks = [0, ...cleanedManual];
   } else {
     const finiteTimes = times.filter(Number.isFinite);
@@ -106,13 +106,13 @@ export function collectPresentationSegments(nodes, links, options = {}) {
     breaks = uniqueSortedTimes(times, contentDuration, firstKeyframe);
   }
   return breaks.slice(0, -1).map((start, index) => {
-    const end = manualDividerMode
+    const end = manualBreakMode
       ? breaks[index + 1]
       : Math.max(start + MIN_CLIP_SECONDS, breaks[index + 1]);
     const eventsAtStart = timeline.filter(event => Math.abs(event.start - start) < MIN_BREAK_GAP);
     const firstEvent = eventsAtStart[0];
     const eventLabel = firstEvent ? describeTimelineEvent(firstEvent, nodeById, linkById) : 'Opening frame';
-    const safeEnd = manualDividerMode ? end : Math.min(end, contentDuration);
+    const safeEnd = manualBreakMode ? end : Math.min(end, contentDuration);
     return {
       index,
       start,

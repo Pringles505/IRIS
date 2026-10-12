@@ -1227,7 +1227,7 @@ export async function renderAnimationClipToMP4({
         console.warn(`GIF encoder preserved ${gifFrameCount}/${frameBytes.length} frames at ${fps} FPS (continuing).`);
       }
       // Apply precise timing including any requested final-frame hold so the
-      // clip ends at the last divider and visibly rests before advancing.
+      // clip ends at the last slide break and visibly rests before advancing.
       const effectiveGifSeconds = (Math.max(0, Number(clipLen) || 0) / Math.max(0.25, Number(effPlaybackRate) || 1));
       const totalGifSeconds = Math.max(
         Math.max(0.1, Number(GIF_EXPORT_MIN_DURATION_SEC) || 0),

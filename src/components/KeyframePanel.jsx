@@ -150,7 +150,7 @@ function Ruler({ total, contentDur, slideBreaks = [], onRemoveBreak, onMoveBreak
   return (
     <div ref={rulerRef} style={{ height: RULER_H, background: 'var(--panel-bg)', borderBottom: '1px solid var(--border-strong)', position: 'relative', flexShrink: 0 }}>
       {ticks}
-      {/* Manual GIF divider markers */}
+      {/* Manual slide break markers */}
       {slideBreaks.map((t, i) => {
         const x = t * PX_PER_SEC;
         return (
@@ -160,7 +160,7 @@ function Ruler({ total, contentDur, slideBreaks = [], onRemoveBreak, onMoveBreak
             onMouseDown={(e) => startDrag(t, e)}
           >
             <div
-              title={`GIF divider @ ${t.toFixed(2)}s (right-click to remove)`}
+              title={`Slide break @ ${t.toFixed(2)}s (right-click to remove)`}
               onContextMenu={e => { e.preventDefault(); onRemoveBreak?.(t); }}
               style={{
                 position: 'absolute', top: 2, left: -6,
@@ -258,6 +258,9 @@ function KeyframePanel({ playback }) {
   const [selectedItem,  setSelectedItem]  = useState(null);
 
   const blockDragRef  = useRef(null);
+  // True while a bar drag actually moved; suppresses the trailing click so
+  // adjusting timing never changes the selection (plain clicks still select).
+  const didBlockDragRef = useRef(false);
   const headDragRef   = useRef(false);
   const timelineRef   = useRef(null);
   const leftBodyRef   = useRef(null);
@@ -998,22 +1001,25 @@ function KeyframePanel({ playback }) {
     if (!el) return;
     const rect = el.getBoundingClientRect();
     const relX = clientX - rect.left + el.scrollLeft;
-    const t = Math.max(0, relX / PX_PER_SEC);
+    // The scrubbable range is the full drawn ruler (content + breathing room),
+    // not just the playback duration — otherwise the playhead sticks at the end
+    // of the content while the cursor keeps moving.
+    const maxBreak = (slideBreaks && slideBreaks.length) ? Math.max(...slideBreaks) : 0;
+    const cDur = Math.max(contentDuration ?? totalDuration, maxBreak, 4);
+    const tW = cDur * PX_PER_SEC + 40;
+    const maxT = (tW - 2) / PX_PER_SEC;
+    const t = Math.max(0, Math.min(relX / PX_PER_SEC, maxT));
 
     // Update the playhead DOM position immediately without a React re-render.
     // The throttled `seek` call will eventually sync React state, but the visual
     // feedback needs to be instant so the scrubber doesn't feel laggy.
     if (playheadRef.current) {
-      const maxBreak = (slideBreaks && slideBreaks.length) ? Math.max(...slideBreaks) : 0;
-      const cDur = Math.max(contentDuration ?? totalDuration, maxBreak, 4);
-      const tW = cDur * PX_PER_SEC + 40;
-      const px = Math.min(t * PX_PER_SEC, tW - 2);
-      playheadRef.current.style.left = px + 'px';
+      playheadRef.current.style.left = (t * PX_PER_SEC) + 'px';
       const label = playheadRef.current.querySelector('[data-time-label]');
       if (label) label.textContent = t.toFixed(2) + 's';
     }
 
-    seek(t);
+    seek(t, maxT);
     setTimelineCursor(t);
   }, [seek, contentDuration, totalDuration, slideBreaks]);
 
@@ -1042,6 +1048,7 @@ function KeyframePanel({ playback }) {
     const onMove = (e) => {
       const d = blockDragRef.current;
       if (!d) return;
+      if (Math.abs(e.clientX - d.startX) > 3) didBlockDragRef.current = true;
       cursorXRef.current = e.clientX;
       if (!autoScrollRAF) autoScrollRAF = requestAnimationFrame(runAutoScroll);
       const dtSec  = (e.clientX - d.startX) / PX_PER_SEC;
@@ -1243,6 +1250,8 @@ function KeyframePanel({ playback }) {
       blockDragRef.current = null;
       if (autoScrollRAF) { cancelAnimationFrame(autoScrollRAF); autoScrollRAF = null; }
       document.body.style.userSelect = '';
+      // Clear after the click event (which fires right after mouseup) has been suppressed.
+      if (didBlockDragRef.current) setTimeout(() => { didBlockDragRef.current = false; }, 0);
     };
     document.addEventListener('mousemove', onMove);
     document.addEventListener('mouseup',   onUp);
@@ -1299,6 +1308,7 @@ function KeyframePanel({ playback }) {
 
   const handleTimelineSelect = useCallback((e, kind, id, options = {}) => {
     e.stopPropagation();
+    if (didBlockDragRef.current) return;
     const nextItem = options.manualTokenTextKeyframeId
       ? { kind: 'manual-token-text', id, keyframeId: options.manualTokenTextKeyframeId }
       : options.morphId
@@ -1347,9 +1357,6 @@ function KeyframePanel({ playback }) {
     e.stopPropagation();
     document.body.style.userSelect = 'none';
     _pushHistory();
-    setSelectedItem(options.morphId
-      ? { kind: 'text-morph', id: item.id, morphId: options.morphId }
-      : { kind, id: item.id });
     freezeIndependentTimelineItems(kind, item.id);
     const { start, duration } = effectiveTiming(item, kind);
     const morphTiming = kind === 'node' && options.morphId
@@ -1496,8 +1503,6 @@ function KeyframePanel({ playback }) {
     e.stopPropagation();
     document.body.style.userSelect = 'none';
     _pushHistory();
-    setSelected(link.id);
-    setSelectedItem({ kind: 'manual-token-text', id: link.id, keyframeId: keyframe.id });
     blockDragRef.current = {
       dragType: 'manual-token-text-move',
       kind: 'manual-token-text',
@@ -1506,7 +1511,7 @@ function KeyframePanel({ playback }) {
       startX: e.clientX,
       initKeyframeTime: keyframe.time,
     };
-  }, [_pushHistory, setSelected]);
+  }, [_pushHistory]);
 
   const handleTimelineMouseDown = useCallback((e) => {
     e.preventDefault();
@@ -1642,6 +1647,32 @@ function KeyframePanel({ playback }) {
 
         <VSep />
 
+        {/* Slide controls — before the selection editor so clicking things never shifts them */}
+        {!collapsed && (
+          <>
+            <FieldLabel>Slides</FieldLabel>
+            <span style={{ color: 'var(--text-dim)', fontSize: 11, minWidth: 24 }} title="Number of manual slide breaks">
+              {slideBreaks.length}
+            </span>
+            <button
+              onClick={() => addSlideBreakAt(r2(currentTime))}
+              title="Add slide break at playhead time. The last break ends the final slide."
+              style={{ background: 'none', border: '1px solid var(--border-strong)', borderRadius: 4, color: 'var(--text-main)', fontSize: 10, padding: '2px 8px', cursor: 'pointer', whiteSpace: 'nowrap' }}
+            >
+              Add slide
+            </button>
+            <button
+              onClick={clearSlideBreaks}
+              disabled={!slideBreaks.length}
+              title="Remove all slide breaks"
+              style={{ background: 'none', border: '1px solid var(--border-strong)', borderRadius: 4, color: 'var(--text-dim)', fontSize: 10, padding: '2px 8px', cursor: slideBreaks.length ? 'pointer' : 'not-allowed', whiteSpace: 'nowrap', opacity: slideBreaks.length ? 1 : 0.6 }}
+            >
+              Clear
+            </button>
+            <VSep />
+          </>
+        )}
+
         {!collapsed && selData && selTiming && (
           <>
             <span style={{ color: selKind === 'node' ? pageColors.purpleAccent : pageColors.blueLink, fontSize: 12, whiteSpace: 'nowrap', maxWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis' }}>
@@ -1666,7 +1697,7 @@ function KeyframePanel({ playback }) {
                       background: 'var(--panel-bg)', border: '1px solid var(--border-strong)',
                       borderRadius: 4, color: isTrigger ? pageColors.blueLink : 'var(--text-dim)',
                       padding: '3px 6px', fontSize: 11, cursor: 'pointer',
-                      minWidth: 325, fontWeight: isTrigger ? 600 : 400,
+                      width: 150, textOverflow: 'ellipsis', fontWeight: isTrigger ? 600 : 400,
                     }}
                   >
                     <option value="">None</option>
@@ -2122,32 +2153,6 @@ function KeyframePanel({ playback }) {
           </>
         )}
 
-        <VSep />
-        {/* Slide controls */}
-        {!collapsed && (
-          <>
-            <FieldLabel>GIF dividers</FieldLabel>
-            <span style={{ color: 'var(--text-dim)', fontSize: 11, minWidth: 24 }} title="Number of manual GIF dividers">
-              {slideBreaks.length}
-            </span>
-            <button
-              onClick={() => addSlideBreakAt(r2(currentTime))}
-              title="Add GIF divider at playhead time. The last divider ends the final GIF."
-              style={{ background: 'none', border: '1px solid var(--border-strong)', borderRadius: 4, color: 'var(--text-main)', fontSize: 10, padding: '2px 8px', cursor: 'pointer', whiteSpace: 'nowrap' }}
-            >
-              Add divider @ {r2(currentTime)}s
-            </button>
-            <button
-              onClick={clearSlideBreaks}
-              disabled={!slideBreaks.length}
-              title="Remove all GIF dividers"
-              style={{ background: 'none', border: '1px solid var(--border-strong)', borderRadius: 4, color: 'var(--text-dim)', fontSize: 10, padding: '2px 8px', cursor: slideBreaks.length ? 'pointer' : 'not-allowed', whiteSpace: 'nowrap', opacity: slideBreaks.length ? 1 : 0.6 }}
-            >
-              Clear
-            </button>
-          </>
-        )}
-
         {!collapsed && isEmpty && (
           <span style={{ color: 'var(--text-faint)', fontSize: 12 }}>Add a node to the canvas to start the timeline.</span>
         )}
@@ -2463,8 +2468,6 @@ function KeyframePanel({ playback }) {
                       e.stopPropagation();
                       document.body.style.userSelect = 'none';
                       _pushHistory();
-                      setSelected(node.id);
-                      setSelectedItem({ kind: 'node-failure', id: node.id, failureId: failure.id });
                       blockDragRef.current = {
                         dragType,
                         kind: 'node-failure',
@@ -2535,8 +2538,6 @@ function KeyframePanel({ playback }) {
                       e.stopPropagation();
                       document.body.style.userSelect = 'none';
                       _pushHistory();
-                      setSelected(node.id);
-                      setSelectedItem({ kind: 'scroll-step', id: node.id, stepId: step.id });
                       blockDragRef.current = {
                         dragType,
                         kind: 'scroll-step',
@@ -2604,11 +2605,11 @@ function KeyframePanel({ playback }) {
                       e.preventDefault();
                       e.stopPropagation();
                       document.body.style.userSelect = 'none';
-                      setSelectedItem({ kind: 'variable-token', id: varNode.id, hopLinkId: linkId });
                       const startX = e.clientX;
                       const onMove = (me) => {
                         const deltaPx = me.clientX - startX;
                         if (Math.abs(deltaPx) < DRAG_THRESHOLD_PX) return;
+                        didBlockDragRef.current = true;
                         const dx = deltaPx / PX_PER_SEC;
                         const next = r2(baseDelay + dx);
                         const link = links.find(l => l.id === linkId);
@@ -2633,11 +2634,11 @@ function KeyframePanel({ playback }) {
                       e.preventDefault();
                       e.stopPropagation();
                       document.body.style.userSelect = 'none';
-                      setSelectedItem({ kind: 'variable-token', id: varNode.id, hopLinkId: linkId });
                       const startX = e.clientX;
                       const onMove = (me) => {
                         const deltaPx = me.clientX - startX;
                         if (Math.abs(deltaPx) < DRAG_THRESHOLD_PX) return;
+                        didBlockDragRef.current = true;
                         const dx = deltaPx / PX_PER_SEC;
                         const next = Math.max(0.05, r2(baseDur + dx));
                         const link = links.find(l => l.id === linkId);
@@ -2660,7 +2661,7 @@ function KeyframePanel({ playback }) {
                     return (
                       <div
                         key={`token-${varNode.id}`}
-                        onClick={() => setSelectedItem({ kind: 'variable-token', id: varNode.id })}
+                        onClick={() => { if (!didBlockDragRef.current) setSelectedItem({ kind: 'variable-token', id: varNode.id }); }}
                         style={{ height: ROW_H, borderBottom: `1px solid ${pageColors.timelineRowDivider}`, position: 'relative', flexShrink: 0, background: isTokenRowSel ? withAlpha(TOKEN_HUE.solid, 0.04) : pageColors.transparent, cursor: 'crosshair' }}
                       >
                         {web.tokenPath.map((linkId, hopIndex) => {
@@ -2698,6 +2699,7 @@ function KeyframePanel({ playback }) {
                                 : `Hop ${hopIndex + 1} · ${fromNode?.label ?? '?'} → ${toNode?.label ?? '?'} · ${timing.duration.toFixed(2)}s${timing.hasOverride ? ' (override)' : ' (default)'}${timing.hasDelay ? ` · +${timing.delay.toFixed(2)}s delay` : ''} · double-click to remove`}
                               onClick={(ev) => {
                                 ev.stopPropagation();
+                                if (didBlockDragRef.current) return;
                                 setSelectedItem({ kind: 'variable-token', id: varNode.id, hopLinkId: linkId });
                               }}
                               onDoubleClick={(ev) => {
@@ -2841,7 +2843,7 @@ function KeyframePanel({ playback }) {
                     return (
                       <div
                         key={`${row.type}-${node.id}-${domain.id}`}
-                        onClick={(e) => { e.stopPropagation(); setSelectedItem({ kind: selKindWant, id: node.id, domainId: domain.id }); }}
+                        onClick={(e) => { e.stopPropagation(); if (!didBlockDragRef.current) setSelectedItem({ kind: selKindWant, id: node.id, domainId: domain.id }); }}
                         style={{ height: ROW_H, borderBottom: `1px solid ${pageColors.timelineRowDivider}`, position: 'relative', flexShrink: 0, background: isSel ? withAlpha(hue, 0.04) : pageColors.transparent, cursor: 'crosshair' }}
                       >
                         <div
@@ -2900,7 +2902,7 @@ function KeyframePanel({ playback }) {
                     return (
                       <div
                         key={`gpoint-${node.id}-${pt.id}`}
-                        onClick={(e) => { e.stopPropagation(); setSelectedItem({ kind: 'graph-point', id: node.id, pointId: pt.id }); }}
+                        onClick={(e) => { e.stopPropagation(); if (!didBlockDragRef.current) setSelectedItem({ kind: 'graph-point', id: node.id, pointId: pt.id }); }}
                         style={{ height: ROW_H, borderBottom: `1px solid ${pageColors.timelineRowDivider}`, position: 'relative', flexShrink: 0, background: isSel ? withAlpha(NODE_HUE.solid, 0.04) : pageColors.transparent, cursor: 'crosshair' }}
                       >
                         <div
