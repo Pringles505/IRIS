@@ -5,6 +5,7 @@ import { getNodeLabelFrame } from '../../nodeLabelFrame';
 import useStore from '../../store/useStore';
 import { snapDraggedBox } from './dragSnap';
 import NodeStatusMark, { getNodeStatusDash, getNodeStatusStroke, getNodeStatusTextColor } from './NodeStatusMark';
+import { getCustomShapeOutline } from '../../shapes/customShape';
 
 const PORT_R = 7;
 
@@ -44,7 +45,7 @@ function getSubdiagramTransformStyle(node, resolvedTargetNode) {
 }
 
 function renderSubdiagramHighlight(node, extraProps = {}) {
-  if (node.shape === 'diamond' || node.shape === 'hexagon' || node.shape === 'circle' || node.shape === 'pillar' || node.shape === 'cylinder' || node.shape === 'database' || node.shape === 'slanted') return null;
+  if (node.shape === 'diamond' || node.shape === 'hexagon' || node.shape === 'circle' || node.shape === 'pillar' || node.shape === 'cylinder' || node.shape === 'database' || node.shape === 'slanted' || node.shape === 'custom') return null;
   return (
     <Rect
       x={node.shape === 'pill' ? node.height / 2 : (node.cornerRadius ?? 10)}
@@ -60,6 +61,13 @@ function renderSubdiagramHighlight(node, extraProps = {}) {
 
 function renderSubdiagramBody(node, stroke, strokeWidth, fill, shadow = false, extraProps = {}) {
   const common = { stroke, strokeWidth, fill, ...extraProps };
+
+  if (node.shape === 'custom') {
+    const outline = getCustomShapeOutline(node.customShape, node.width, node.height);
+    if (outline) {
+      return <Line points={outline} closed {...common} x={shadow ? 4 : 0} y={shadow ? 4 : 0} />;
+    }
+  }
 
   if (node.shape === 'diamond') {
     const points = [

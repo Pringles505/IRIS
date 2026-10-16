@@ -111,6 +111,7 @@ export function parseProjectFile(jsonString) {
     links: data.links,
     slideBreaks: Array.isArray(data.slideBreaks) ? data.slideBreaks : (Array.isArray(data.slides) ? data.slides : []),
     captureFrame: data.captureFrame ?? null,
+    timelineEnd: Number.isFinite(data.timelineEnd) ? data.timelineEnd : null,
   };
 }
 

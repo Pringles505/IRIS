@@ -11,6 +11,8 @@ import useStore from '../store/useStore';
 import { getNodeDisplayText, getNodeTextFontFamily } from '../text/equationText';
 import NodeStatusMark, { getNodeStatusDash, getNodeStatusStroke, getNodeStatusTextColor } from './canvas/NodeStatusMark';
 import LinkFailureMark from './canvas/LinkFailureMark';
+import { getCustomShapeOutline } from '../shapes/customShape';
+import { getLinkFailureStyle } from '../animation/nodeFailureStyle';
 
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
@@ -52,6 +54,10 @@ function renderBodyShape(node, extraProps = {}) {
     ...extraProps,
   };
 
+  if (shape === 'custom') {
+    const outline = getCustomShapeOutline(node.customShape, w, h);
+    if (outline) return <Line points={outline} closed {...props} />;
+  }
   if (shape === 'diamond') {
     return <Line points={[w / 2, 0, w, h / 2, w / 2, h, 0, h / 2]} closed {...props} />;
   }
@@ -85,7 +91,7 @@ function renderBodyShape(node, extraProps = {}) {
 // Thin top-edge highlight stripe — matches NodeShape/SubdiagramShape's renderNodeHighlight.
 function renderHighlight(node, extraProps = {}) {
   const { width: w, height: h, shape, cornerRadius } = node;
-  if (shape === 'diamond' || shape === 'hexagon' || shape === 'circle' || shape === 'pillar' || shape === 'cylinder' || shape === 'database' || shape === 'slanted') return null;
+  if (shape === 'diamond' || shape === 'hexagon' || shape === 'circle' || shape === 'pillar' || shape === 'cylinder' || shape === 'database' || shape === 'slanted' || shape === 'custom') return null;
   const inset = shape === 'pill' ? h / 2 : (cornerRadius ?? 8);
   return (
     <Rect
@@ -322,7 +328,8 @@ function ReadonlyLinkShape({ link, fromNode, toNode, allNodes, allLinks }) {
   if (!render) return null;
 
   const isFailing = !!link.failing;
-  const color = isFailing ? pageColors.dangerBright : link.stroke ?? pageColors.blueNodeStroke;
+  const failStyle = getLinkFailureStyle(link);
+  const color = isFailing && failStyle.tint ? failStyle.color : link.stroke ?? pageColors.blueNodeStroke;
   const sw = link.strokeWidth ?? 2;
 
   // Simulation options (readonly overlay)
@@ -566,6 +573,9 @@ const SubdiagramOverlay = forwardRef(function SubdiagramOverlayInner({
   const failAtEndsById = useMemo(() => Object.fromEntries((snapshotLinks ?? []).map(l => [l.id, !!l.failAtEnds])), [snapshotLinks]);
   const failOnTokenEndById = useMemo(() => Object.fromEntries((snapshotLinks ?? []).map(l => [l.id, !!l.failOnTokenEnd])), [snapshotLinks]);
   const failingById = useMemo(() => Object.fromEntries((snapshotLinks ?? []).map(l => [l.id, !!l.failing])), [snapshotLinks]);
+  const linkFailureById = useMemo(() => Object.fromEntries((snapshotLinks ?? [])
+    .filter(l => l.failureKeyframes?.length)
+    .map(l => [l.id, { failureKeyframes: l.failureKeyframes }])), [snapshotLinks]);
   const overlayMonitors = useMemo(
     () => cleanedSnapshotNodes.filter(n => n.type === 'monitor'),
     [cleanedSnapshotNodes]
@@ -648,7 +658,7 @@ const SubdiagramOverlay = forwardRef(function SubdiagramOverlayInner({
       const ct = Math.max(0, Math.min(engineRef.current.getContentDuration(), t));
       const state = engineRef.current.getStateAtTime(ct);
       applyAnimState(layerRef.current, state, linkRendersRef.current, null, {
-        webs: overlayWebs, webByLinkId: overlayWebByLinkId, monitors: overlayMonitors, currentTime: ct, timelineStart: earliestStart, bindToTokenHopById, bindMetaById, linkStartOverrideById, linkDurationOverrideById, manualTokenTimingById, failAtEndsById, failOnTokenEndById, failingById, isPlaying: true,
+        webs: overlayWebs, webByLinkId: overlayWebByLinkId, monitors: overlayMonitors, currentTime: ct, timelineStart: earliestStart, bindToTokenHopById, bindMetaById, linkStartOverrideById, linkDurationOverrideById, manualTokenTimingById, failAtEndsById, failOnTokenEndById, failingById, linkFailureById, isPlaying: true,
       });
       layerRef.current.draw();
       updateNestedPopupImperatively(ct);
@@ -663,6 +673,7 @@ const SubdiagramOverlay = forwardRef(function SubdiagramOverlayInner({
     failAtEndsById,
     failOnTokenEndById,
     failingById,
+    linkFailureById,
     overlayMonitors,
     overlayWebByLinkId,
     overlayWebs,
@@ -675,7 +686,7 @@ const SubdiagramOverlay = forwardRef(function SubdiagramOverlayInner({
     const ct = engine.getContentDuration();
     const state = engine.getStateAtTime(ct);
     applyAnimState(layerRef.current, state, linkRenders, null, {
-      webs: overlayWebs, webByLinkId: overlayWebByLinkId, monitors: overlayMonitors, currentTime: ct, timelineStart: earliestStart, bindToTokenHopById, bindMetaById, linkStartOverrideById, linkDurationOverrideById, manualTokenTimingById, failAtEndsById, failOnTokenEndById, failingById, isPlaying: false,
+      webs: overlayWebs, webByLinkId: overlayWebByLinkId, monitors: overlayMonitors, currentTime: ct, timelineStart: earliestStart, bindToTokenHopById, bindMetaById, linkStartOverrideById, linkDurationOverrideById, manualTokenTimingById, failAtEndsById, failOnTokenEndById, failingById, linkFailureById, isPlaying: false,
     });
     layerRef.current.draw();
     setDisplayTime(ct);
@@ -691,6 +702,7 @@ const SubdiagramOverlay = forwardRef(function SubdiagramOverlayInner({
     failAtEndsById,
     failOnTokenEndById,
     failingById,
+    linkFailureById,
     overlayMonitors,
     overlayWebByLinkId,
     overlayWebs,
@@ -709,7 +721,7 @@ const SubdiagramOverlay = forwardRef(function SubdiagramOverlayInner({
     // Subsequent per-frame updates are driven imperatively via setTime() — no React re-renders.
     const state = engine.getStateAtTime(controlledDisplayTime);
     applyAnimState(layerRef.current, state, linkRenders, null, {
-      webs: overlayWebs, webByLinkId: overlayWebByLinkId, monitors: overlayMonitors, currentTime: controlledDisplayTime, timelineStart: earliestStart, bindToTokenHopById, bindMetaById, linkStartOverrideById, linkDurationOverrideById, manualTokenTimingById, failAtEndsById, failOnTokenEndById, failingById, isPlaying: false,
+      webs: overlayWebs, webByLinkId: overlayWebByLinkId, monitors: overlayMonitors, currentTime: controlledDisplayTime, timelineStart: earliestStart, bindToTokenHopById, bindMetaById, linkStartOverrideById, linkDurationOverrideById, manualTokenTimingById, failAtEndsById, failOnTokenEndById, failingById, linkFailureById, isPlaying: false,
     });
     layerRef.current.draw();
   }, [
@@ -726,6 +738,7 @@ const SubdiagramOverlay = forwardRef(function SubdiagramOverlayInner({
     failAtEndsById,
     failOnTokenEndById,
     failingById,
+    linkFailureById,
     overlayMonitors,
     overlayWebByLinkId,
     overlayWebs,
@@ -757,7 +770,7 @@ const SubdiagramOverlay = forwardRef(function SubdiagramOverlayInner({
     if (layerRef.current) {
       const state = engine.getStateAtTime(0);
       applyAnimState(layerRef.current, state, linkRenders, null, {
-        webs: overlayWebs, webByLinkId: overlayWebByLinkId, monitors: overlayMonitors, currentTime: 0, timelineStart: earliestStart, bindToTokenHopById, bindMetaById, linkStartOverrideById, linkDurationOverrideById, manualTokenTimingById, failAtEndsById, failOnTokenEndById, failingById, isPlaying: true,
+        webs: overlayWebs, webByLinkId: overlayWebByLinkId, monitors: overlayMonitors, currentTime: 0, timelineStart: earliestStart, bindToTokenHopById, bindMetaById, linkStartOverrideById, linkDurationOverrideById, manualTokenTimingById, failAtEndsById, failOnTokenEndById, failingById, linkFailureById, isPlaying: true,
       });
       layerRef.current.draw();
     }
@@ -778,7 +791,7 @@ const SubdiagramOverlay = forwardRef(function SubdiagramOverlayInner({
         setDisplayTime(contentDuration);
         if (layerRef.current) {
           applyAnimState(layerRef.current, state, linkRenders, null, {
-            webs: overlayWebs, webByLinkId: overlayWebByLinkId, monitors: overlayMonitors, currentTime: contentDuration, timelineStart: earliestStart, bindToTokenHopById, bindMetaById, linkStartOverrideById, linkDurationOverrideById, manualTokenTimingById, failAtEndsById, failOnTokenEndById, failingById, isPlaying: false,
+            webs: overlayWebs, webByLinkId: overlayWebByLinkId, monitors: overlayMonitors, currentTime: contentDuration, timelineStart: earliestStart, bindToTokenHopById, bindMetaById, linkStartOverrideById, linkDurationOverrideById, manualTokenTimingById, failAtEndsById, failOnTokenEndById, failingById, linkFailureById, isPlaying: false,
           });
           layerRef.current.draw();
         }
@@ -788,7 +801,7 @@ const SubdiagramOverlay = forwardRef(function SubdiagramOverlayInner({
       const state = engine.getStateAtTime(elapsed);
       if (layerRef.current) {
         applyAnimState(layerRef.current, state, linkRenders, null, {
-          webs: overlayWebs, webByLinkId: overlayWebByLinkId, monitors: overlayMonitors, currentTime: elapsed, timelineStart: earliestStart, bindToTokenHopById, bindMetaById, linkStartOverrideById, linkDurationOverrideById, manualTokenTimingById, failAtEndsById, failOnTokenEndById, failingById, isPlaying: true,
+          webs: overlayWebs, webByLinkId: overlayWebByLinkId, monitors: overlayMonitors, currentTime: elapsed, timelineStart: earliestStart, bindToTokenHopById, bindMetaById, linkStartOverrideById, linkDurationOverrideById, manualTokenTimingById, failAtEndsById, failOnTokenEndById, failingById, linkFailureById, isPlaying: true,
         });
         layerRef.current.draw();
       }
@@ -814,6 +827,7 @@ const SubdiagramOverlay = forwardRef(function SubdiagramOverlayInner({
     failAtEndsById,
     failOnTokenEndById,
     failingById,
+    linkFailureById,
     overlayMonitors,
     overlayWebByLinkId,
     overlayWebs,

@@ -1,10 +1,11 @@
 import { getLinkJointProgress } from '../links/linkGeometry';
 import { computeVariableWebs } from '../variables/flow';
 import { getNodeTextMorphs, getTextMorphRenderState, getStyleMorphRenderState } from '../text/textMorphs';
-import { computeManualTokenTimingByLinkId, normalizeManualTokenTextKeyframes } from './manualTokenTiming';
+import { computeManualTokenTimingByLinkId, getLinkedTokenArrival, isOwnTokenEvent, normalizeManualTokenTextKeyframes } from './manualTokenTiming';
 import { getNodeFailureOpacity, normalizeNodeFailureKeyframes } from './nodeFailureTiming';
 import { computeAreaScrollState } from './scrollGrid';
 import { normalizeScrollSteps } from './scrollStepTiming';
+import { buildEventsFromTimeline } from '../events/eventsFromTimeline';
 
 const ease = {
   linear: t => t,
@@ -28,6 +29,32 @@ function lerp(a, b, t) {
 function inverseEaseOut(value) {
   const clamped = clamp(value, 0, 1);
   return 1 - Math.pow(1 - clamped, 1 / 3);
+}
+
+// Blueprint items (added in blueprint mode) sit outside the timeline: always visible,
+// never taking a slot in the auto sequence. Giving one a trigger or a start time puts
+// it on the timeline like any other item.
+export function isBlueprintItem(item, kind = 'node') {
+  if (!item?.blueprint || item.animStartTime != null || item.triggerEventId) return false;
+  return kind !== 'node' || !item.triggerAfterLinkId;
+}
+
+// A link is "done" for whatever follows it once it has drawn and its token (if it
+// follows the link) has arrived.
+function getLinkInfo(link, start, duration) {
+  const end = start + duration;
+  const tokenEnd = getLinkedTokenArrival(link, start, duration);
+  return { start, end, duration, releaseEnd: Math.max(end, tokenEnd ?? -Infinity), tokenEnd };
+}
+
+// Start of an item triggered by a link: the item may overlap the end of the draw by
+// `lead`, but never starts before the link's token has arrived.
+function startAfterLink(info, lead, delay) {
+  return Math.max(
+    info.start,
+    info.end - lead + delay,
+    info.tokenEnd != null ? info.tokenEnd + delay : -Infinity
+  );
 }
 
 function getJunctionKey(link) {
@@ -235,7 +262,15 @@ export class AnimationEngine {
     const triggeredNodes = timelineNodes.filter(n =>  n.triggerAfterLinkId);
 
     for (const node of freeNodes) {
-      const start    = node.animStartTime != null ? node.animStartTime : t;
+      if (isBlueprintItem(node, 'node')) {
+        const duration = node.animDuration != null ? node.animDuration : nodeDuration;
+        events.push({ type: 'node', id: node.id, start: 0, duration, displayDuration: duration, blueprint: true });
+        continue;
+      }
+      // Event-triggered nodes get their real start after the timeline is built
+      // (see resolveEventTriggers below), so they don't take a slot in the auto sequence.
+      const eventTriggered = !!node.triggerEventId;
+      const start    = eventTriggered ? (node.animStartTime ?? 0) : (node.animStartTime != null ? node.animStartTime : t);
       const duration = node.animDuration  != null ? node.animDuration  : nodeDuration;
       events.push({
         type: 'node',
@@ -244,7 +279,7 @@ export class AnimationEngine {
         duration,
         displayDuration: duration,
       });
-      t = Math.max(t, start + duration + nodeGap);
+      if (!eventTriggered) t = Math.max(t, start + duration + nodeGap);
     }
 
     t += linkStartPause;
@@ -291,11 +326,18 @@ export class AnimationEngine {
         for (const sibling of siblingLinks) {
           const duration = sibling.animDuration != null ? sibling.animDuration : linkDuration;
           events.push({ type: 'link', id: sibling.id, start, duration });
-          linkInfoMap[sibling.id] = { start, end: start + duration, duration };
-          groupEnd = Math.max(groupEnd, start + duration);
+          linkInfoMap[sibling.id] = getLinkInfo(sibling, start, duration);
+          groupEnd = Math.max(groupEnd, linkInfoMap[sibling.id].releaseEnd);
         }
         t = Math.max(t, groupEnd + linkGap);
         processedSimultaneousJunctions.add(junctionKey);
+        continue;
+      }
+
+      if (isBlueprintItem(link, 'link')) {
+        const duration = link.animDuration != null ? link.animDuration : linkDuration;
+        events.push({ type: 'link', id: link.id, start: 0, duration, blueprint: true });
+        linkInfoMap[link.id] = getLinkInfo(link, 0, duration);
         continue;
       }
 
@@ -303,7 +345,12 @@ export class AnimationEngine {
       const autoStart = link.exemptFromSync
         ? t
         : getAutoJunctionStart(link, t);
-      let start    = link.animStartTime != null ? link.animStartTime : autoStart;
+      // Event-triggered links get their real start in _resolveEventTriggers, so they
+      // don't take a slot in the auto sequence.
+      const eventTriggered = !!link.triggerEventId;
+      let start    = eventTriggered
+        ? (link.animStartTime ?? 0)
+        : (link.animStartTime != null ? link.animStartTime : autoStart);
       let duration = link.animDuration  != null ? link.animDuration  : linkDuration;
 
       // If binding to token hop is enabled, override start/duration from tokenTiming
@@ -320,8 +367,8 @@ export class AnimationEngine {
         }
       }
       events.push({ type: 'link', id: link.id, start, duration });
-      linkInfoMap[link.id] = { start, end: start + duration, duration };
-      t = Math.max(t, start + duration + linkGap);
+      linkInfoMap[link.id] = getLinkInfo(link, start, duration);
+      if (!eventTriggered) t = Math.max(t, linkInfoMap[link.id].releaseEnd + linkGap);
     }
 
     // Expose hop timing map for bound-link rendering in getStateAtTime
@@ -330,12 +377,9 @@ export class AnimationEngine {
     for (const node of triggeredNodes) {
       const info     = linkInfoMap[node.triggerAfterLinkId];
       const duration = node.animDuration != null ? node.animDuration : nodeDuration;
-      const triggerEnd = info ? info.end : t;
-      const earliest   = info ? info.start : 0;
-
       const lead  = node.triggerMode === 'on-end' ? 0 : duration * 0.7;
       const delay = node.triggerDelay ?? 0;
-      const start = Math.max(earliest, triggerEnd - lead + delay);
+      const start = info ? startAfterLink(info, lead, delay) : Math.max(0, t - lead + delay);
       events.push({
         type: 'node',
         id: node.id,
@@ -357,7 +401,7 @@ export class AnimationEngine {
       if (!triggerLinkInfo) return null;
       const lead = node.triggerMode === 'on-end' ? 0 : event.duration * 0.7;
       const delay = node.triggerDelay ?? 0;
-      return Math.max(triggerLinkInfo.start, triggerLinkInfo.end - lead + delay);
+      return startAfterLink(triggerLinkInfo, lead, delay);
     };
 
     while (pendingEvents.length) {
@@ -384,7 +428,7 @@ export class AnimationEngine {
       const event = pendingEvents.splice(nextIndex, 1)[0];
       event.start = nextStart;
       let shiftedStart = event.start;
-      for (const pause of scheduledPauses) {
+      for (const pause of event.blueprint ? [] : scheduledPauses) {
         if (pause.ownerId === event.id) continue;
         const shiftedEnd = shiftedStart + event.duration;
         if (shiftedEnd <= pause.ownerEnd) continue;
@@ -406,11 +450,7 @@ export class AnimationEngine {
       scheduledEvents.push(event);
 
       if (event.type === 'link') {
-        scheduledLinkInfoMap[event.id] = {
-          start: event.start,
-          end: event.start + event.duration,
-          duration: event.duration,
-        };
+        scheduledLinkInfoMap[event.id] = getLinkInfo(linkMap.get(event.id), event.start, event.duration);
         continue;
       }
 
@@ -444,6 +484,8 @@ export class AnimationEngine {
     const finalEvents = scheduledEvents
       .sort((a, b) => a.order - b.order)
       .map(({ order, ...event }) => event);
+
+    this._resolveEventTriggers(finalEvents, getSubdiagramPopupMetrics);
 
     for (const event of finalEvents) {
       if (event.type !== 'node') continue;
@@ -548,8 +590,8 @@ export class AnimationEngine {
       }
     }
 
-    for (const node of this.nodes) {
-      for (const keyframe of normalizeNodeFailureKeyframes(node.failureKeyframes)) {
+    for (const item of [...this.nodes, ...this.links]) {
+      for (const keyframe of normalizeNodeFailureKeyframes(item.failureKeyframes)) {
         this._contentDuration = Math.max(
           this._contentDuration,
           keyframe.startTime + keyframe.duration
@@ -582,6 +624,100 @@ export class AnimationEngine {
     return finalEvents;
   }
 
+  // Nodes and links triggered by an event (a morph, failure, token, …) start when that
+  // event happens. Events are read from the timeline itself and passes repeat until the
+  // whole chain (A triggers B triggers C …) has settled, however long it is. Each pass
+  // settles at least one more link of a chain, so a chain can't need more passes than
+  // there are triggered items; only a trigger cycle runs into that limit.
+  _resolveEventTriggers(timeline, getSubdiagramPopupMetrics) {
+    const eventTriggeredLinkIds = new Set(
+      this.links.filter(link => link.triggerEventId).map(link => link.id)
+    );
+    const triggered = [
+      ...this.nodes
+        .filter(node => node.type !== 'mirror')
+        .map(node => {
+          if (node.triggerEventId && !node.triggerAfterLinkId) {
+            return { kind: 'node', item: node, eventId: node.triggerEventId };
+          }
+          // A node triggered by a link that itself moved to an event follows that link.
+          if (node.triggerAfterLinkId && eventTriggeredLinkIds.has(node.triggerAfterLinkId)) {
+            return { kind: 'node', item: node, eventId: `link:${node.triggerAfterLinkId}` };
+          }
+          return null;
+        })
+        .filter(Boolean),
+      ...this.links
+        .filter(link => link.triggerEventId)
+        .map(link => ({ kind: 'link', item: link, eventId: link.triggerEventId })),
+      // Tokens can be triggered on their own, independent of their link's draw.
+      ...this.links
+        .filter(link => link.manualTokenEnabled && link.manualTokenTriggerEventId
+          && !isOwnTokenEvent(link.id, link.manualTokenTriggerEventId))
+        .map(link => ({ kind: 'token', item: link, eventId: link.manualTokenTriggerEventId })),
+    ];
+    if (!triggered.length) return;
+    const timelineEvents = new Map(timeline.map(event => [`${event.type}:${event.id}`, event]));
+
+    const maxPasses = triggered.length + 2;
+    for (let pass = 0; pass < maxPasses; pass += 1) {
+      const webs = computeVariableWebs(this.nodes, this.links, { timeline });
+      const events = buildEventsFromTimeline(this.nodes, this.links, timeline, webs);
+      const eventById = new Map(events.map(event => [event.id, event]));
+      let changed = false;
+
+      for (const { kind, item, eventId } of triggered) {
+        const own = timelineEvents.get(`${kind === 'token' ? 'link' : kind}:${item.id}`);
+        const trigger = eventById.get(eventId);
+        if (!own || !trigger) continue;
+        if (kind === 'token') {
+          // The token's start anchor (its delay still applies) is read by
+          // computeManualTokenTimingByLinkId from the link's timeline event.
+          const anchor = Math.max(0, trigger.end);
+          if (Number.isFinite(own.tokenTriggerTime) && Math.abs(anchor - own.tokenTriggerTime) < 1e-6) continue;
+          own.tokenTriggerTime = anchor;
+          changed = true;
+          continue;
+        }
+        // A token's event lasts until it has fully arrived, so items it triggers never
+        // start while it is still travelling (no "while drawing" overlap for tokens).
+        // Links start when the event ends unless they opt into overlapping it.
+        const arrivesAtEnd = trigger.kind === 'token' || trigger.kind === 'variable-token';
+        const overlaps = kind === 'node' ? item.triggerMode !== 'on-end' : item.triggerMode === 'overlap';
+        const lead = overlaps && !arrivesAtEnd ? own.duration * 0.7 : 0;
+        const delay = item.triggerDelay ?? 0;
+        // A link's draw isn't over for what it triggers until its token has arrived.
+        const linkToken = trigger.kind === 'link' && !this._linkById.get(trigger.ownerId)?.manualTokenTriggerEventId
+          ? eventById.get(`token:${trigger.ownerId}`)
+          : null;
+        const start = Math.max(0, trigger.start, trigger.end - lead + delay, linkToken ? linkToken.end + delay : 0);
+        if (Math.abs(start - own.start) < 1e-6) continue;
+        own.start = start;
+        changed = true;
+        // Items later in this pass that this one triggers see its new time right away,
+        // so a chain usually settles in a pass or two instead of one step per pass.
+        const ownEvent = eventById.get(`${kind}:${item.id}`);
+        if (ownEvent) {
+          ownEvent.start = start;
+          ownEvent.end = start + own.duration;
+        }
+        if (kind !== 'node') continue;
+
+        own.displayDuration = own.duration;
+        const popup = getSubdiagramPopupMetrics(item, start, own.duration, null);
+        if (popup) {
+          own.popupStart = popup.popupStart;
+          own.popupEnd = popup.popupEnd;
+          own.displayDuration = Math.max(
+            own.duration,
+            popup.popupEnd != null ? popup.popupEnd - start : 0
+          );
+        }
+      }
+      if (!changed) break;
+    }
+  }
+
   getTotalDuration() {
     return this._totalDuration;
   }
@@ -608,7 +744,8 @@ export class AnimationEngine {
     const linkStates = {};
 
     for (const event of this._timeline) {
-      const raw = clamp((t - event.start) / event.duration, 0, 1);
+      // Blueprint items are always fully shown.
+      const raw = event.blueprint ? 1 : clamp((t - event.start) / event.duration, 0, 1);
 
       if (event.type === 'node') {
         const node = this._nodeById.get(event.id);
@@ -711,6 +848,10 @@ export class AnimationEngine {
         const link = this._linkById.get(event.id);
         // Default link progress from scheduled event
         let progress = ease.easeOut(raw);
+        if (event.blueprint) {
+          linkStates[event.id] = { progress: 1 };
+          continue;
+        }
         // Instant mode: skip the draw-in and pop fully drawn at the keyframe.
         if (link && link.disableAnimation) {
           linkStates[event.id] = { progress: t >= event.start ? 1 : 0 };

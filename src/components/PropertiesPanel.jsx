@@ -1,4 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
+import ShapePreview from './ShapePreview';
+import CustomShapeEditor from './CustomShapeEditor';
 import { docsNav } from '../docsNav';
 import { toColorInputValue } from '../colorValue';
 import { v4 as uuid } from 'uuid';
@@ -15,6 +18,7 @@ import {
   normalizeManualTokenTextKeyframes,
 } from '../animation/manualTokenTiming';
 import { getTimelineCursor } from '../timelineCursor';
+import { DEFAULT_FAILURE_STYLE, DEFAULT_LINK_FAILURE_STYLE, getLinkFailureStyle, getNodeFailureStyle, linkCanFail } from '../animation/nodeFailureStyle';
 import { DEFAULT_NODE_FAILURE_DURATION, normalizeNodeFailureKeyframes } from '../animation/nodeFailureTiming';
 import { DEFAULT_SCROLL_STEP_DURATION, normalizeScrollSteps } from '../animation/scrollStepTiming';
 
@@ -265,71 +269,103 @@ function ModeChip({ label, active, onClick }) {
   );
 }
 
+// Failures are added from the Failures row, so the status only covers offline.
 function NodeStatusControl({ node, onChange }) {
-  const status = node?.offline ? 'offline' : node?.failing ? 'failing' : 'normal';
-  const setStatus = (nextStatus) => onChange({
-    failing: nextStatus === 'failing',
-    offline: nextStatus === 'offline',
-  });
+  const status = node?.offline ? 'offline' : 'normal';
+  const setStatus = (nextStatus) => onChange({ offline: nextStatus === 'offline' });
   return (
     <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
       <ModeChip label="Normal" active={status === 'normal'} onClick={() => setStatus('normal')} />
-      <ModeChip label="Always fail" active={status === 'failing'} onClick={() => setStatus('failing')} />
       <ModeChip label="Offline" active={status === 'offline'} onClick={() => setStatus('offline')} />
     </div>
   );
 }
 
-function NodeFailureControls({ node, onChange }) {
-  const keyframes = normalizeNodeFailureKeyframes(node?.failureKeyframes);
-  const setKeyframes = nextKeyframes => onChange({
-    failing: false,
-    offline: false,
-    failureKeyframes: normalizeNodeFailureKeyframes(nextKeyframes),
+// A node or link has at most one timed failure. Adding puts it at the playhead (its timing
+// is then edited by dragging the block on the timeline); once added it can be removed here.
+// A timed failure replaces the item's other failure states.
+function AddNodeFailureButton({ node, onChange, isLink = false }) {
+  // Older projects may still carry a status-style failure (always failing, or a link failing
+  // at its draw/token end). It counts as the item's failure so it can still be removed here.
+  const legacyFailure = isLink
+    ? !!node?.failing || !!node?.failAtEnds || !!node?.failOnTokenEnd
+    : !!node?.failing;
+  const hasFailure = legacyFailure || normalizeNodeFailureKeyframes(node?.failureKeyframes).length > 0;
+  const addFailure = () => onChange({
+    ...(isLink
+      ? { failing: false, failAtEnds: false, failOnTokenEnd: false }
+      : { failing: false, offline: false }),
+    failureKeyframes: [{
+      id: uuid(),
+      startTime: Math.round(Math.max(0, getTimelineCursor()) * 100) / 100,
+      duration: DEFAULT_NODE_FAILURE_DURATION,
+      // By default a failure happens when its link finishes drawing (or its node finishes
+      // appearing); the Trigger button in the timeline bar can point it at another event.
+      triggerEventId: `${isLink ? 'link' : 'node'}:${node.id}`,
+    }],
   });
-  const addFailure = () => {
-    const startTime = Math.round(Math.max(0, getTimelineCursor()) * 100) / 100;
-    setKeyframes([
-      ...keyframes,
-      { id: uuid(), startTime, duration: DEFAULT_NODE_FAILURE_DURATION },
-    ]);
-  };
-  const updateFailure = (id, updates) => setKeyframes(
-    keyframes.map(keyframe => keyframe.id === id ? { ...keyframe, ...updates } : keyframe)
+  return hasFailure
+    ? (
+      <ActionButton
+        label="Remove Failure"
+        danger
+        onClick={() => onChange({
+          failing: false,
+          ...(isLink ? { failAtEnds: false, failOnTokenEnd: false } : {}),
+          failureKeyframes: [],
+        })}
+      />
+    )
+    : <ActionButton label="Add Failure" danger onClick={addFailure} />;
+}
+
+// The failure look only matters once the node fails (a timed failure, or an older always-failing node).
+function nodeCanFail(node) {
+  return !!node?.failing || (node?.failureKeyframes?.length ?? 0) > 0;
+}
+
+function NodeFailureLookControls({ node, onChange, isLink = false }) {
+  const style = isLink ? getLinkFailureStyle(node) : getNodeFailureStyle(node);
+  const set = updates => onChange({ failureStyle: { ...style, ...updates } });
+  const pct = v => `${Math.round(v * 100)}%`;
+  const slider = (label, key, min, max, step) => (
+    <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+      <span style={{ color: 'var(--text-muted)', fontSize: 11, width: 62, flexShrink: 0 }}>{label}</span>
+      <input
+        type="range"
+        min={min}
+        max={max}
+        step={step}
+        value={style[key]}
+        onChange={e => set({ [key]: Number(e.target.value) })}
+        style={{ flex: 1, minWidth: 0, accentColor: 'var(--purple-bright)', cursor: 'pointer' }}
+      />
+      <span style={{ color: 'var(--text-main)', fontSize: 11, fontFamily: 'monospace', width: 36, textAlign: 'right' }}>{pct(style[key])}</span>
+    </label>
   );
 
   return (
-    <div style={{ flex: 1, minWidth: 0 }}>
-      <ActionButton label="Add failure at playhead" onClick={addFailure} />
-      {keyframes.map((keyframe, index) => (
-        <div key={keyframe.id} style={{
-          display: 'flex', alignItems: 'center', gap: 5, marginTop: 7,
-          padding: '6px 7px', borderRadius: 6,
-          background: 'var(--danger-surface-soft)', border: '1px solid var(--danger-border-soft)',
-        }}>
-          <span style={{ color: 'var(--danger-bright)', fontSize: 10, fontWeight: 700 }}>{index + 1}</span>
-          <NumberInput
-            value={keyframe.startTime}
-            min={0}
-            step={0.05}
-            onChange={value => updateFailure(keyframe.id, { startTime: Math.round(Math.max(0, value) * 100) / 100 })}
-          />
-          <span style={{ color: 'var(--text-dim)', fontSize: 9 }}>for</span>
-          <NumberInput
-            value={keyframe.duration}
-            min={0.1}
-            step={0.05}
-            onChange={value => updateFailure(keyframe.id, { duration: Math.round(Math.max(0.1, value) * 100) / 100 })}
-          />
-          <button
-            onClick={() => setKeyframes(keyframes.filter(item => item.id !== keyframe.id))}
-            title="Remove failure keyframe"
-            style={{ background: 'none', border: 'none', color: 'var(--danger-bright)', cursor: 'pointer', fontSize: 15, padding: 2 }}
-          >
-            ×
-          </button>
-        </div>
-      ))}
+    <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 9 }}>
+      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+        <ModeChip label="✕ Cross" active={style.mark === 'x'} onClick={() => set({ mark: 'x' })} />
+        <ModeChip label="╱ Slash" active={style.mark === 'slash'} onClick={() => set({ mark: 'slash' })} />
+        <ModeChip label="⊘ Ban" active={style.mark === 'ban'} onClick={() => set({ mark: 'ban' })} />
+        <ModeChip label="None" active={style.mark === 'none'} onClick={() => set({ mark: 'none' })} />
+      </div>
+      <ColorInput value={style.color} onChange={color => set({ color })} />
+      {style.mark !== 'none' && (
+        <>
+          {slider('Size', 'size', 0.4, 2.5, 0.05)}
+          {slider('Thickness', 'thickness', 0.4, 3, 0.05)}
+          <ToggleInput checked={style.halo} onChange={halo => set({ halo })} label="Glow behind mark" />
+        </>
+      )}
+      <ToggleInput checked={style.tint} onChange={tint => set({ tint })} label={isLink ? 'Recolor the link' : 'Tint node body'} />
+      {style.tint && slider('Tint', 'tintStrength', 0.05, isLink ? 1 : 0.8, 0.01)}
+      <ActionButton
+        label="Reset to default look"
+        onClick={() => onChange({ failureStyle: { ...(isLink ? DEFAULT_LINK_FAILURE_STYLE : DEFAULT_FAILURE_STYLE) } })}
+      />
     </div>
   );
 }
@@ -391,15 +427,15 @@ function ToggleInput({ checked, onChange, label = 'Enabled' }) {
   );
 }
 
-function ActionButton({ label, active = false, onClick }) {
+function ActionButton({ label, active = false, danger = false, onClick }) {
   return (
     <button
       onClick={onClick}
       style={{
         background: active ? 'var(--purple-surface-panel)' : 'var(--panel-bg)',
-        border: `1px solid ${active ? 'var(--purple-border-strong)' : 'var(--border-strong)'}`,
+        border: `1px solid ${active ? 'var(--purple-border-strong)' : danger ? 'var(--danger-border-soft)' : 'var(--border-strong)'}`,
         borderRadius: 6,
-        color: active ? 'var(--text-main)' : 'var(--text-muted)',
+        color: danger ? 'var(--danger-bright)' : active ? 'var(--text-main)' : 'var(--text-muted)',
         fontSize: 11,
         padding: '5px 8px',
         cursor: 'pointer',
@@ -422,6 +458,131 @@ const NODE_SHAPE_OPTIONS = [
   { key: 'circle', label: 'Circle' },
   { key: 'protocol', label: 'Protocol' },
 ];
+
+// ── Shape picker ─────────────────────────────────────────────────────────────
+const CUSTOM_SHAPE_OPTION = { key: 'custom', label: 'Custom' };
+
+// `onCustomApply` enables the "Custom" option, which opens the custom shape editor.
+function ShapePicker({ value, onSelect, fill, stroke, customShape = null, width, height, anchors = [], customAnchorsOnly = false, onCustomApply = null }) {
+  const [menu, setMenu] = useState(null);
+  const [editing, setEditing] = useState(false);
+  const btnRef = useRef(null);
+  const popRef = useRef(null);
+  const options = onCustomApply ? [...NODE_SHAPE_OPTIONS, CUSTOM_SHAPE_OPTION] : NODE_SHAPE_OPTIONS;
+  const current = options.find(option => option.key === value) ?? NODE_SHAPE_OPTIONS[1];
+  const previewFill = fill || 'var(--panel-blue)';
+  const previewStroke = stroke || 'var(--blue-bright)';
+
+  const toggle = () => {
+    if (menu) { setMenu(null); return; }
+    const rect = btnRef.current.getBoundingClientRect();
+    const width = 312;
+    const left = Math.max(8, Math.min(rect.right - width, window.innerWidth - width - 8));
+    const spaceBelow = window.innerHeight - rect.bottom;
+    setMenu(spaceBelow > 320
+      ? { left, top: rect.bottom + 6, width }
+      : { left, bottom: window.innerHeight - rect.top + 6, width });
+  };
+
+  useEffect(() => {
+    if (!menu) return undefined;
+    const onDown = e => {
+      if (popRef.current?.contains(e.target) || btnRef.current?.contains(e.target)) return;
+      setMenu(null);
+    };
+    const onKey = e => { if (e.key === 'Escape') setMenu(null); };
+    const close = () => setMenu(null);
+    document.addEventListener('mousedown', onDown);
+    document.addEventListener('keydown', onKey);
+    window.addEventListener('resize', close);
+    // The popup is fixed-positioned, so close it rather than let it drift when the panel scrolls.
+    const onScroll = e => { if (!popRef.current?.contains(e.target)) close(); };
+    window.addEventListener('scroll', onScroll, true);
+    return () => {
+      document.removeEventListener('mousedown', onDown);
+      document.removeEventListener('keydown', onKey);
+      window.removeEventListener('resize', close);
+      window.removeEventListener('scroll', onScroll, true);
+    };
+  }, [menu]);
+
+  return (
+    <div style={{ flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', gap: 10 }}>
+      <ShapePreview
+        shape={current.key}
+        customShape={customShape}
+        width={current.key === 'custom' ? width : null}
+        height={current.key === 'custom' ? height : null}
+        fill={previewFill}
+        stroke={previewStroke}
+        boxW={44}
+        boxH={28}
+      />
+      <span style={{ color: 'var(--text-main)', fontSize: 12, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+        {current.label}
+      </span>
+      <button ref={btnRef} onClick={toggle} className={`shape-pick__btn${menu ? ' shape-pick__btn--open' : ''}`}>
+        Modify shape
+      </button>
+
+      {menu && createPortal(
+        <div ref={popRef} className="shape-pop" style={menu} role="listbox" aria-label="Node shapes">
+          <div className="shape-pop__head">Choose a shape</div>
+          <div className="shape-pop__grid">
+            {options.map(option => {
+              const active = option.key === current.key;
+              const isCustom = option.key === 'custom';
+              return (
+                <button
+                  key={option.key}
+                  role="option"
+                  aria-selected={active}
+                  className={`shape-pop__tile${active ? ' shape-pop__tile--active' : ''}${isCustom ? ' shape-pop__tile--custom' : ''}`}
+                  onClick={() => {
+                    setMenu(null);
+                    if (isCustom) setEditing(true);
+                    else onSelect(option.key);
+                  }}
+                  title={isCustom ? 'Draw your own shape' : option.label}
+                >
+                  {isCustom && !customShape ? (
+                    <span className="shape-pop__custom-icon" aria-hidden="true">✎</span>
+                  ) : (
+                    <ShapePreview
+                      shape={option.key}
+                      customShape={isCustom ? customShape : null}
+                      width={isCustom ? width : null}
+                      height={isCustom ? height : null}
+                      fill={previewFill}
+                      stroke={previewStroke}
+                    />
+                  )}
+                  <span>{isCustom && customShape ? 'Edit custom' : option.label}</span>
+                </button>
+              );
+            })}
+          </div>
+        </div>,
+        document.body
+      )}
+
+      {editing && (
+        <CustomShapeEditor
+          initial={customShape}
+          baseShape={value === 'custom' ? 'rounded' : value}
+          width={width ?? 150}
+          height={height ?? 52}
+          fill={previewFill}
+          stroke={previewStroke}
+          anchors={anchors}
+          customAnchorsOnly={customAnchorsOnly}
+          onClose={() => setEditing(false)}
+          onApply={(next, anchorUpdate) => { setEditing(false); onCustomApply(next, anchorUpdate); }}
+        />
+      )}
+    </div>
+  );
+}
 
 const SELECT_INPUT_STYLE = {
   flex: 1,
@@ -463,19 +624,7 @@ function getDefaultResolveStart(node) {
   return Math.round((((node?.animStartTime ?? 0) + (node?.animDuration ?? 0.5)) * 100)) / 100;
 }
 
-function LinkBasics({ linkLike, onUpdate }) {
-  const failureMode = linkLike.failOnTokenEnd
-    ? 'token-end'
-    : linkLike.failAtEnds
-      ? 'draw-end'
-      : linkLike.failing
-        ? 'failing'
-        : 'normal';
-  const setFailureMode = (mode) => onUpdate({
-    failing: mode === 'failing',
-    failAtEnds: mode === 'draw-end',
-    failOnTokenEnd: mode === 'token-end',
-  });
+function LinkBasics({ linkLike, onUpdate, allowTimedFailure = false }) {
   return (
     <>
       <Row label="Color">
@@ -503,14 +652,16 @@ function LinkBasics({ linkLike, onUpdate }) {
           </div>
         </Row>
       )}
-      <Row label="Failure">
-        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-          <ModeChip label="Normal" active={failureMode === 'normal'} onClick={() => setFailureMode('normal')} />
-          <ModeChip label="Failing" active={failureMode === 'failing'} onClick={() => setFailureMode('failing')} />
-          <ModeChip label="At draw end" active={failureMode === 'draw-end'} onClick={() => setFailureMode('draw-end')} />
-          <ModeChip label="At token end" active={failureMode === 'token-end'} onClick={() => setFailureMode('token-end')} />
-        </div>
-      </Row>
+      {allowTimedFailure && (
+        <Row label="Failures">
+          <AddNodeFailureButton node={linkLike} onChange={onUpdate} isLink />
+        </Row>
+      )}
+      {linkCanFail(linkLike) && (
+        <Row label="Failure look">
+          <NodeFailureLookControls node={linkLike} onChange={onUpdate} isLink />
+        </Row>
+      )}
       <Row label="Instant">
         <ToggleInput
           checked={!!linkLike.disableAnimation}
@@ -554,34 +705,22 @@ function LinkBasics({ linkLike, onUpdate }) {
       {linkLike.manualTokenEnabled && (
         <>
           <Row label="Start">
+            {/* A triggered token starts after its trigger event (set with the timeline's
+                Trigger button); picking a link anchor clears the trigger. */}
             <select
-              value={linkLike.manualTokenAnchor ?? 'start'}
-              onChange={e => onUpdate({ manualTokenAnchor: e.target.value })}
+              value={linkLike.manualTokenTriggerEventId ? 'trigger' : (linkLike.manualTokenAnchor ?? 'start')}
+              onChange={e => {
+                if (e.target.value === 'trigger') return;
+                onUpdate({ manualTokenAnchor: e.target.value, manualTokenTriggerEventId: null });
+              }}
               style={SELECT_INPUT_STYLE}
             >
               <option value="start">When the link starts</option>
               <option value="end">When the link completes</option>
+              {linkLike.manualTokenTriggerEventId && (
+                <option value="trigger">When its trigger event ends</option>
+              )}
             </select>
-          </Row>
-          <Row label="Delay">
-            <NumberInput
-              value={Number.isFinite(linkLike.manualTokenDelay) ? linkLike.manualTokenDelay : 0}
-              min={-10}
-              max={10}
-              step={0.05}
-              onChange={v => onUpdate({ manualTokenDelay: v })}
-            />
-          </Row>
-          <Row label="Travel time">
-            <NumberInput
-              value={Number.isFinite(linkLike.manualTokenDuration)
-                ? linkLike.manualTokenDuration
-                : (Number.isFinite(linkLike.animDuration) ? linkLike.animDuration : 0.65)}
-              min={0.05}
-              max={60}
-              step={0.05}
-              onChange={v => onUpdate({ manualTokenDuration: Math.max(0.05, v) })}
-            />
           </Row>
           <Row label="Direction">
             <ToggleInput
@@ -791,18 +930,22 @@ function PanelContent() {
         </Row>
 
         <Row label="Shape">
-          <select
+          <ShapePicker
             value={selectedNode.shape ?? 'rounded'}
-            onChange={(e) => updateNode(selectedNode.id, {
-              ...NODE_SHAPE_PRESETS[e.target.value],
+            fill={selectedNode.fill}
+            stroke={selectedNode.stroke}
+            customShape={selectedNode.customShape ?? null}
+            width={selectedNode.width}
+            height={selectedNode.height}
+            anchors={selectedNode.anchors ?? []}
+            customAnchorsOnly={!!selectedNode.customAnchorsOnly}
+            onSelect={shape => updateNode(selectedNode.id, {
+              ...NODE_SHAPE_PRESETS[shape],
               type: selectedNode.type,
+              customAnchorsOnly: false,
             })}
-            style={SELECT_INPUT_STYLE}
-          >
-            {NODE_SHAPE_OPTIONS.map((shape) => (
-              <option key={shape.key} value={shape.key}>{shape.label}</option>
-            ))}
-          </select>
+            onCustomApply={(customShape, anchorUpdate) => updateNode(selectedNode.id, { shape: 'custom', customShape, ...anchorUpdate })}
+          />
         </Row>
 
         <Row label="Source">
@@ -891,20 +1034,17 @@ function PanelContent() {
               />
             </Row>
             <Row label="Shape">
-              <select
+              <ShapePicker
                 value={selectedNode.transformTarget?.shape ?? selectedNode.shape ?? 'rounded'}
-                onChange={e => updateResolveTarget({
-                  width: NODE_SHAPE_PRESETS[e.target.value]?.width ?? selectedNode.width ?? 150,
-                  height: NODE_SHAPE_PRESETS[e.target.value]?.height ?? selectedNode.height ?? 52,
-                  shape: e.target.value,
-                  cornerRadius: NODE_SHAPE_PRESETS[e.target.value]?.cornerRadius ?? (e.target.value === 'pill' ? 999 : e.target.value === 'rectangle' ? 0 : 8),
+                fill={selectedNode.transformTarget?.fill ?? selectedNode.fill}
+                stroke={selectedNode.transformTarget?.stroke ?? selectedNode.stroke}
+                onSelect={shape => updateResolveTarget({
+                  width: NODE_SHAPE_PRESETS[shape]?.width ?? selectedNode.width ?? 150,
+                  height: NODE_SHAPE_PRESETS[shape]?.height ?? selectedNode.height ?? 52,
+                  shape,
+                  cornerRadius: NODE_SHAPE_PRESETS[shape]?.cornerRadius ?? (shape === 'pill' ? 999 : shape === 'rectangle' ? 0 : 8),
                 })}
-                style={SELECT_INPUT_STYLE}
-              >
-                {NODE_SHAPE_OPTIONS.map((shape) => (
-                  <option key={shape.key} value={shape.key}>{shape.label}</option>
-                ))}
-              </select>
+              />
             </Row>
             <Row label="Fill">
               <ColorInput
@@ -1142,8 +1282,13 @@ function PanelContent() {
           <NodeStatusControl node={selectedNode} onChange={updates => updateNode(selectedNode.id, updates)} />
         </Row>
         <Row label="Failures">
-          <NodeFailureControls node={selectedNode} onChange={updates => updateNode(selectedNode.id, updates)} />
+          <AddNodeFailureButton node={selectedNode} onChange={updates => updateNode(selectedNode.id, updates)} />
         </Row>
+        {nodeCanFail(selectedNode) && (
+          <Row label="Failure look">
+            <NodeFailureLookControls node={selectedNode} onChange={updates => updateNode(selectedNode.id, updates)} />
+          </Row>
+        )}
         <Row label="Width">
           <NumberInput value={selectedNode.width} min={120} max={600} onChange={v => up('width', v)} />
         </Row>
@@ -1669,8 +1814,13 @@ function PanelContent() {
               <NodeStatusControl node={selectedNode} onChange={updates => updateNode(selectedNode.id, updates)} />
             </Row>
             <Row label="Failures">
-              <NodeFailureControls node={selectedNode} onChange={updates => updateNode(selectedNode.id, updates)} />
+              <AddNodeFailureButton node={selectedNode} onChange={updates => updateNode(selectedNode.id, updates)} />
             </Row>
+            {nodeCanFail(selectedNode) && (
+              <Row label="Failure look">
+                <NodeFailureLookControls node={selectedNode} onChange={updates => updateNode(selectedNode.id, updates)} />
+              </Row>
+            )}
           </>
         )}
         {supportsEquation && (
@@ -2184,16 +2334,18 @@ function PanelContent() {
         )}
         {!isTextNode && (
           <Row label="Shape">
-            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-              {NODE_SHAPE_OPTIONS.map((shape) => (
-                <ModeChip
-                  key={shape.key}
-                  label={shape.label}
-                  active={(selectedNode.shape ?? 'rounded') === shape.key}
-                  onClick={() => updateNode(selectedNode.id, NODE_SHAPE_PRESETS[shape.key])}
-                />
-              ))}
-            </div>
+            <ShapePicker
+              value={selectedNode.shape ?? 'rounded'}
+              fill={selectedNode.fill}
+              stroke={selectedNode.stroke}
+              customShape={selectedNode.customShape ?? null}
+              width={selectedNode.width}
+              height={selectedNode.height}
+              anchors={selectedNode.anchors ?? []}
+              customAnchorsOnly={!!selectedNode.customAnchorsOnly}
+              onSelect={shape => updateNode(selectedNode.id, { ...NODE_SHAPE_PRESETS[shape], customAnchorsOnly: false })}
+              onCustomApply={(customShape, anchorUpdate) => updateNode(selectedNode.id, { shape: 'custom', customShape, ...anchorUpdate })}
+            />
           </Row>
         )}
         <Row label="Text">
@@ -3024,7 +3176,7 @@ function PanelContent() {
           </>
         )}
 
-        {selectedNode.triggerAfterLinkId && (
+        {(selectedNode.triggerAfterLinkId || selectedNode.triggerEventId) && (
           <>
             <Section title="Spawn Timing" hint="While drawing: fades in during the final portion of the link draw — At completion: starts exactly when the link finishes" docAnchor="spawn-timing" />
             <div style={{ display: 'flex', gap: 6, marginBottom: 10 }}>
@@ -3115,6 +3267,7 @@ function PanelContent() {
 
       <LinkBasics
         linkLike={selectedLink}
+        allowTimedFailure
         onUpdate={updates => {
           updateLink(selectedLink.id, updates);
           if (updates && Object.prototype.hasOwnProperty.call(updates, 'bindToTokenHop')) {

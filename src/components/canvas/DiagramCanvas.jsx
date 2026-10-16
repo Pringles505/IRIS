@@ -1,3 +1,4 @@
+import Konva from 'konva';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Layer, Line, Rect, Stage, Text } from 'react-konva';
 import { v4 as uuid } from 'uuid';
@@ -249,6 +250,9 @@ function DiagramCanvas({ stageRef, layerRef, playback }) {
     const onDown = (e) => {
       if (e.button === 1) {
         e.preventDefault();
+        // Middle mouse only pans: keep the press away from the canvas shapes so it can
+        // never select or click a node/link.
+        e.stopPropagation();
         const stage = stageRef.current;
         pan = { clientX: e.clientX, clientY: e.clientY, stageX: stage.x(), stageY: stage.y() };
         container.style.cursor = 'grabbing';
@@ -256,6 +260,9 @@ function DiagramCanvas({ stageRef, layerRef, playback }) {
       }
       if (e.button !== 0) return;
       if (linkingFromRef.current) return;
+      // Only a press directly on the canvas starts a selection box — not on overlays
+      // drawn above it, like the screen-preview frame's resize handles.
+      if (!(e.target instanceof HTMLCanvasElement)) return;
       const sc = stageXY(e.clientX, e.clientY);
       const shape = stageRef.current.getIntersection(sc);
       if (!isCanvasBackgroundShape(shape)) return;
@@ -272,6 +279,14 @@ function DiagramCanvas({ stageRef, layerRef, playback }) {
         return;
       }
       if (!rb) return;
+      // A canvas drag (moving a node, resizing an area, ...) won the press: no selection box.
+      if (Konva.isDragging()) {
+        rb = null;
+        rbActive = false;
+        container.style.cursor = '';
+        setSelectionBox(null);
+        return;
+      }
       const pt = toCanvas(e.clientX, e.clientY);
       const dx = pt.x - rb.x1, dy = pt.y - rb.y1;
       if (!rbActive && (Math.abs(dx) > 3 || Math.abs(dy) > 3)) {
@@ -322,13 +337,21 @@ function DiagramCanvas({ stageRef, layerRef, playback }) {
       }
     };
 
-    container.addEventListener('mousedown', onDown);
+    // Middle-button presses/releases never reach the canvas shapes, so panning can't
+    // select or click anything. Capture phase runs before Konva's own listeners.
+    const blockMiddle = (e) => { if (e.button === 1) e.stopPropagation(); };
+    const MIDDLE_EVENTS = ['pointerdown', 'pointerup', 'mouseup', 'click', 'auxclick', 'dblclick'];
+
+    container.addEventListener('mousedown', onDown, true);
+    MIDDLE_EVENTS.forEach(type => container.addEventListener(type, blockMiddle, true));
     window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
+    // Capture so ending a pan still works when the release is blocked from the canvas.
+    window.addEventListener('mouseup', onUp, true);
     return () => {
-      container.removeEventListener('mousedown', onDown);
+      container.removeEventListener('mousedown', onDown, true);
+      MIDDLE_EVENTS.forEach(type => container.removeEventListener(type, blockMiddle, true));
       window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
+      window.removeEventListener('mouseup', onUp, true);
     };
   }, []);
 

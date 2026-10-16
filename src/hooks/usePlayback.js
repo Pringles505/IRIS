@@ -1,13 +1,27 @@
+import { setTimelineCursor } from '../timelineCursor';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AnimationEngine } from '../animation/AnimationEngine';
-import { applyAnimState, computeLinkRenders, resetAnimState } from '../animation/applyAnimState';
+import { applyAnimState, clearAnimNodeCache, computeLinkRenders, resetAnimState } from '../animation/applyAnimState';
 import { computeManualTokenTimingByLinkId } from '../animation/manualTokenTiming';
 import { buildMirrorBindings } from '../mirror/mirrorData';
 import useStore from '../store/useStore';
 import { buildWebByLinkId } from '../variables/flow';
 
+// Where the timeline ends: the user's explicit end, or automatically the furthest of
+// the animation, the last slide break and a 4s minimum. Playback always runs to it.
+export function computeTimelineEnd({ totalDuration = 0, contentDuration = 0, slideBreaks = [], timelineEnd = null }) {
+  if (Number.isFinite(timelineEnd) && timelineEnd > 0) return timelineEnd;
+  const maxBreak = slideBreaks?.length ? Math.max(...slideBreaks) : 0;
+  return Math.max(totalDuration || 0, contentDuration || 0, maxBreak, 4);
+}
+
 export function usePlayback({ layerRef }) {
-  const { nodes, links, alignment } = useStore();
+  const { nodes, links, alignment, slideBreaks, timelineEnd, editorMode } = useStore();
+  // Blueprint mode is a still editing view: nothing plays and every element is shown
+  // at rest, whatever its keyframes say about the current time.
+  const blueprintMode = editorMode === 'blueprint';
+  const blueprintModeRef = useRef(blueprintMode);
+  blueprintModeRef.current = blueprintMode;
 
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
@@ -33,6 +47,7 @@ export function usePlayback({ layerRef }) {
   const engine = useMemo(() => new AnimationEngine(nodes, links), [nodes, links]);
   const totalDuration   = engine.getTotalDuration();
   const contentDuration = engine.getContentDuration();
+  const endTime = computeTimelineEnd({ totalDuration, contentDuration, slideBreaks, timelineEnd });
   const loopPlayback = useMemo(() => nodes.some(node => (
     node.type === 'area' && node.scrollEnabled && node.scrollSeamless !== false
   )), [nodes]);
@@ -47,6 +62,13 @@ export function usePlayback({ layerRef }) {
   const areaScrollSignature = useMemo(() => nodes
     .filter(node => node.type === 'area')
     .map(a => `${a.id}:${a.scrollEnabled ? 1 : 0}:${a.x}:${a.y}:${a.width}:${a.height}`)
+    .join('|'), [nodes]);
+  // Failure keyframes and the failure look only change shape opacity imperatively, so the
+  // paused frame must be re-applied when they change or edits stay invisible until scrubbing.
+  const failureSignature = useMemo(() => nodes
+    .map(node => (node.failureKeyframes?.length || node.failing
+      ? `${node.id}:${JSON.stringify(node.failureKeyframes ?? [])}:${JSON.stringify(node.failureStyle ?? null)}`
+      : ''))
     .join('|'), [nodes]);
   const timeline = useMemo(() => engine.getTimeline(), [engine]);
   const linkRenders = useMemo(() => computeLinkRenders(nodes, links), [nodes, links]);
@@ -63,6 +85,7 @@ export function usePlayback({ layerRef }) {
   const linkRendersRef = useRef(allLinkRenders);
   const mirrorBindingsRef = useRef(mirrorBindings);
   const totalDurationRef = useRef(totalDuration);
+  const endTimeRef = useRef(endTime);
   const contentDurationRef = useRef(contentDuration);
   const loopPlaybackRef = useRef(loopPlayback);
 
@@ -70,6 +93,7 @@ export function usePlayback({ layerRef }) {
   useEffect(() => { linkRendersRef.current = allLinkRenders; }, [allLinkRenders]);
   useEffect(() => { mirrorBindingsRef.current = mirrorBindings; }, [mirrorBindings]);
   useEffect(() => { totalDurationRef.current = totalDuration; }, [totalDuration]);
+  useEffect(() => { endTimeRef.current = endTime; }, [endTime]);
   useEffect(() => { contentDurationRef.current = contentDuration; }, [contentDuration]);
   useEffect(() => { loopPlaybackRef.current = loopPlayback; }, [loopPlayback]);
 
@@ -92,6 +116,9 @@ export function usePlayback({ layerRef }) {
   const failAtEndsById = useMemo(() => Object.fromEntries(links.map(l => [l.id, !!l.failAtEnds])), [links]);
   const failOnTokenEndById = useMemo(() => Object.fromEntries(links.map(l => [l.id, !!l.failOnTokenEnd])), [links]);
   const failingById = useMemo(() => Object.fromEntries(links.map(l => [l.id, !!l.failing])), [links]);
+  const linkFailureById = useMemo(() => Object.fromEntries(links
+    .filter(l => l.failureKeyframes?.length)
+    .map(l => [l.id, { failureKeyframes: l.failureKeyframes }])), [links]);
 
   const manualTokenTimingById = useMemo(
     () => computeManualTokenTimingByLinkId(links, timeline),
@@ -101,6 +128,11 @@ export function usePlayback({ layerRef }) {
   const applyFrame = useCallback((t, scrollTime = t) => {
     const layer = layerRef.current;
     if (!layer) return;
+    if (blueprintModeRef.current) {
+      const { nodes: allNodes, links: allLinks } = useStore.getState();
+      resetAnimState(layer, allNodes, allLinks, mirrorBindingsRef.current);
+      return;
+    }
     // Contain per-frame render errors here so a single bad time `t` can't break
     // the caller: during playback it would otherwise kill the RAF loop, and while
     // scrubbing it would freeze the canvas mid-drag. Log the cause once.
@@ -121,6 +153,7 @@ export function usePlayback({ layerRef }) {
         failAtEndsById,
         failOnTokenEndById,
         failingById,
+        linkFailureById,
         isPlaying: isPlayingRef.current,
       });
       layer.draw();
@@ -141,6 +174,7 @@ export function usePlayback({ layerRef }) {
     failAtEndsById,
     failOnTokenEndById,
     failingById,
+    linkFailureById,
   ]);
 
   // Latest applyFrame, callable from effects that must NOT re-run on every render
@@ -157,7 +191,13 @@ export function usePlayback({ layerRef }) {
       currentTimeRef.current
     ));
     return () => cancelAnimationFrame(frameId);
-  }, [applyFrame, areaScrollSignature]);
+  }, [applyFrame, areaScrollSignature, failureSignature]);
+
+  // Any edit can mount or unmount canvas shapes; drop cached shape lookups so the
+  // animation finds newly mounted ones (cached misses would otherwise stick forever).
+  useEffect(() => {
+    clearAnimNodeCache(layerRef.current);
+  }, [layerRef, nodes, links]);
 
   const stopLoop = useCallback(() => {
     if (rafRef.current) {
@@ -169,9 +209,9 @@ export function usePlayback({ layerRef }) {
   }, []);
 
   const play = useCallback(() => {
-    if (isPlayingRef.current) return;
+    if (isPlayingRef.current || blueprintModeRef.current) return;
 
-    if (!loopPlaybackRef.current && currentTimeRef.current >= totalDurationRef.current - 0.05) {
+    if (!loopPlaybackRef.current && currentTimeRef.current >= endTimeRef.current - 0.05) {
       currentTimeRef.current = 0;
       playbackTimeRef.current = 0;
       setCurrentTime(0);
@@ -187,7 +227,7 @@ export function usePlayback({ layerRef }) {
       if (!isPlayingRef.current) return;
 
       const elapsed = (performance.now() - clockStartRef.current) / 1000;
-      const duration = totalDurationRef.current;
+      const duration = endTimeRef.current;
       const rawTime = timeStartRef.current + elapsed;
       const shouldLoop = loopPlaybackRef.current && duration > 0.0001;
       const displayTime = shouldLoop
@@ -239,6 +279,7 @@ export function usePlayback({ layerRef }) {
     currentTimeRef.current = 0;
     playbackTimeRef.current = 0;
     setCurrentTime(0);
+    setTimelineCursor(0);
     const layer = layerRef.current;
     if (layer) resetAnimState(layer, nodes, links, mirrorBindingsRef.current);
   }, [layerRef, links, nodes, stopLoop]);
@@ -246,8 +287,8 @@ export function usePlayback({ layerRef }) {
   const seek = useCallback((t, maxTime) => {
     // Manual scrubbing may target the timeline's "breathing room" past the content
     // (to place future keyframes), so callers can pass a larger max than the
-    // playback duration. Defaults to totalDuration when omitted.
-    const upper = Number.isFinite(maxTime) ? Math.max(0, maxTime) : totalDurationRef.current;
+    // playback end. Defaults to the timeline end when omitted.
+    const upper = Number.isFinite(maxTime) ? Math.max(0, maxTime) : endTimeRef.current;
     const clamped = Math.max(0, Math.min(upper, t));
     currentTimeRef.current = clamped;
     playbackTimeRef.current = clamped;
@@ -288,7 +329,7 @@ export function usePlayback({ layerRef }) {
     // new duration, then reset the layer to a clean baseline and re-render the
     // current frame so new/removed items appear in the correct animation state.
     stopLoop();
-    const clamped = Math.max(0, Math.min(currentTimeRef.current, totalDurationRef.current));
+    const clamped = Math.max(0, Math.min(currentTimeRef.current, endTimeRef.current));
     currentTimeRef.current = clamped;
     playbackTimeRef.current = clamped;
     setCurrentTime(clamped);
@@ -303,6 +344,13 @@ export function usePlayback({ layerRef }) {
 
   useEffect(() => () => stopLoop(), [stopLoop]);
 
+  // Entering blueprint mode stops playback and shows every element; leaving it puts the
+  // canvas back to the animation frame at the playhead.
+  useEffect(() => {
+    if (blueprintMode) stopLoop();
+    applyFrameRef.current(playbackTimeRef.current, currentTimeRef.current);
+  }, [blueprintMode, stopLoop]);
+
   // Force the React `currentTime` state to match the imperative ref. Scrubbing
   // updates the playhead DOM directly and only throttles state updates, so the
   // state can lag; callers (e.g. on scrub end) use this so a later re-render
@@ -311,5 +359,5 @@ export function usePlayback({ layerRef }) {
     setCurrentTime(currentTimeRef.current);
   }, []);
 
-  return { isPlaying, currentTime, currentTimeRef, totalDuration, contentDuration, timeline, play, pause, stop, seek, commitTime, frameCallbackRef, subdiagramFrameCallbackRef };
+  return { isPlaying, currentTime, currentTimeRef, totalDuration, contentDuration, endTime, timeline, play, pause, stop, seek, commitTime, frameCallbackRef, subdiagramFrameCallbackRef };
 }

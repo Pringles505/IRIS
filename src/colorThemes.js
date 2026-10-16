@@ -51,6 +51,9 @@ export const colorThemes = {
   warningBright: '#FBBF24',
   warningSoft: '#FDE68A',
 
+  tokenMain: '#D946EF',          // Timeline tokens — distinct from blue links
+  tokenBright: '#E879F9',
+
   dangerMain: '#EF4444',
   dangerBright: '#F87171',
   dangerSoft: '#FCA5A5',

@@ -9,6 +9,8 @@ import { getTimelineCursor } from '../../timelineCursor';
 import { getNodeDisplayText, getNodeTextFontFamily } from '../../text/equationText';
 import { snapDraggedBox } from './dragSnap';
 import NodeStatusMark, { getNodeStatusDash, getNodeStatusStroke, getNodeStatusTextColor } from './NodeStatusMark';
+import { getFailureTintStrength, getNodeFailureStyle } from '../../animation/nodeFailureStyle';
+import { anchorAtPosition, getCustomShapeOutline, projectOntoOutline } from '../../shapes/customShape';
 
 const PORT_R = 7;
 const GRAPH_MIN_W = 160;
@@ -108,7 +110,7 @@ function getNodeTransformStyle(node, resolvedTargetNode) {
 }
 
 function renderNodeHighlight(node, extraProps = {}) {
-  if (node.shape === 'diamond' || node.shape === 'hexagon' || node.shape === 'circle' || node.shape === 'pillar' || node.shape === 'cylinder' || node.shape === 'database' || node.shape === 'slanted' || node.shape === 'protocol') return null;
+  if (node.shape === 'diamond' || node.shape === 'hexagon' || node.shape === 'circle' || node.shape === 'pillar' || node.shape === 'cylinder' || node.shape === 'database' || node.shape === 'slanted' || node.shape === 'protocol' || node.shape === 'custom') return null;
   return (
     <Rect
       x={node.shape === 'pill' ? node.height / 2 : node.cornerRadius}
@@ -137,7 +139,7 @@ function protocolMetrics(w, h) {
 // Single closed path: a rounded body inset on both sides with two connector pins
 // jutting out of each side — a clean "module" silhouette. One fillable/strokable
 // shape so entry fade, selection dashes and colour morphs all keep working.
-function buildProtocolPath(w, h) {
+export function buildProtocolPath(w, h) {
   const { s, bw, r, ph, ys } = protocolMetrics(w, h);
   const bx = s;
   const rx = bx + bw; // right edge of inner body
@@ -170,6 +172,13 @@ function renderNodeBody(node, stroke, strokeWidth, isInSelection, fill, shadow =
     ...dashProps,
     ...extraProps,
   };
+
+  if (node.shape === 'custom') {
+    const outline = getCustomShapeOutline(node.customShape, node.width, node.height);
+    if (outline) {
+      return <Line points={outline} closed {...common} x={shadow ? 4 : 0} y={shadow ? 4 : 0} />;
+    }
+  }
 
   if (node.shape === 'diamond') {
     const points = [
@@ -450,7 +459,8 @@ function NodeShape({ node, isSelected, isInSelection, onSelect, onStartLink, onE
     graphResizeRef.current = null;
   };
 
-  const ports = PORT_POSITIONS(node.width, node.height);
+  // Default side/center ports are hidden once the custom shape editor replaced them.
+  const ports = node.customAnchorsOnly ? [] : PORT_POSITIONS(node.width, node.height);
 
   // Compute display value for the simple popup. Keep it conservative and local.
   const popupValue = (() => {
@@ -1281,9 +1291,14 @@ function NodeShape({ node, isSelected, isInSelection, onSelect, onStartLink, onE
           pageColors.transparent,
           0,
           false,
-          pageColors.dangerSurfaceSoft,
+          getNodeFailureStyle(node).color,
           false,
-          { id: `node-fail-tint-${node.id}`, opacity: node.failing ? 1 : 0, listening: false }
+          {
+            id: `node-fail-tint-${node.id}`,
+            opacity: node.failing ? getFailureTintStrength(node) : 0,
+            failTintStrength: getFailureTintStrength(node),
+            listening: false,
+          }
         )
       )}
 
@@ -1478,13 +1493,24 @@ function NodeShape({ node, isSelected, isInSelection, onSelect, onStartLink, onE
               }}
               onDragMove={(e) => {
                 e.cancelBubble = true;
+                const customOutline = node.shape === 'custom'
+                  ? getCustomShapeOutline(node.customShape, node.width, node.height)
+                  : null;
+                if (customOutline) {
+                  // Custom shapes: keep the anchor on the drawn outline, at an exact spot.
+                  const p = projectOntoOutline(customOutline, e.target.x(), e.target.y());
+                  e.target.x(p.x);
+                  e.target.y(p.y);
+                  updateNodeAnchor(node.id, anchor.id, anchorAtPosition(p.x / node.width, p.y / node.height, node.width, node.height));
+                  return;
+                }
                 const next = getClosestNodeOutlinePosition(node, {
                   x: node.x + e.target.x(),
                   y: node.y + e.target.y(),
                 });
                 e.target.x(next.point.x - node.x);
                 e.target.y(next.point.y - node.y);
-                updateNodeAnchor(node.id, anchor.id, { side: next.side, along: next.along });
+                updateNodeAnchor(node.id, anchor.id, { side: next.side, along: next.along, posX: null, posY: null });
               }}
               onDragEnd={(e) => {
                 e.cancelBubble = true;

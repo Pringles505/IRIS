@@ -1,12 +1,13 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Circle, Group, Line, Path, Rect, Text } from 'react-konva';
 import { pageColors } from '../../colorThemes';
-import { buildLinkRenderData, getLinkParallelOffset, getNodeAnchorCandidates, JOINT_HIT_RADIUS } from '../../links/linkGeometry';
+import { buildLinkRenderData, getLinkParallelOffset, getNodeAnchorCandidates, getPointAtProgress, JOINT_HIT_RADIUS } from '../../links/linkGeometry';
 import useStore from '../../store/useStore';
 import { buildWebByLinkId, computeVariableWebs } from '../../variables/flow';
 import { getManualTokenBaseText, normalizeManualTokenTextKeyframes } from '../../animation/manualTokenTiming';
 import { resolveJointSnap } from './alignmentEngine';
 import LinkFailureMark from './LinkFailureMark';
+import { getLinkFailureStyle, getLinkFailureTintStrength, linkCanFail } from '../../animation/nodeFailureStyle';
 
 const END_HANDLE_RADIUS = 7;
 const ANCHOR_PAD = 12;
@@ -67,6 +68,7 @@ function LinkShape({
     nodes,
     alignment,
     setAlignmentGuides,
+    editorMode,
   } = useStore();
   const render = buildLinkRenderData(link, fromNode, toNode, allLinks, nodes);
   const renderJointMap = Object.fromEntries(render.jointRenderPoints.map(joint => [joint.id, joint]));
@@ -74,10 +76,11 @@ function LinkShape({
   const sourceAnchors = getNodeAnchorCandidates(fromNode, parallelOffset);
   const targetAnchors = getNodeAnchorCandidates(toNode, parallelOffset);
   const isFailing = !!link.failing;
-  const showFailGroup = isFailing || !!link.failAtEnds || !!link.failOnTokenEnd;
+  const showFailGroup = linkCanFail(link);
+  const failStyle = getLinkFailureStyle(link);
   const color = isSelected ? pageColors.blueSelection
     : isInSelection ? pageColors.purpleAccent
-    : isFailing ? pageColors.dangerBright
+    : isFailing && failStyle.tint ? failStyle.color
     : link.stroke;
   const hasJunctionSource = !!(link.fromJunctionLinkId && link.fromJunctionJointId);
   const [draggedStartPoint, setDraggedStartPoint] = useState(null);
@@ -176,7 +179,8 @@ function LinkShape({
           <Path
             id={`link-shaft-fail-overlay-${link.id}`}
             data={render.pathData}
-            stroke={pageColors.dangerBright}
+            stroke={failStyle.color}
+            failTintStrength={getLinkFailureTintStrength(link)}
             strokeWidth={isSelected ? link.strokeWidth + 1 : link.strokeWidth}
             lineCap="round"
             lineJoin="round"
@@ -243,6 +247,30 @@ function LinkShape({
           </Group>
 
       {showFailGroup && <LinkFailureMark link={link} render={render} />}
+
+          {/* Blueprint mode shows nothing moving, so a link with a token gets a fixed
+              marker at its middle: the token, with an arrow the way it travels. */}
+          {editorMode === 'blueprint' && link.manualTokenEnabled && (() => {
+            const { point, tangent } = getPointAtProgress(render, 0.5, false);
+            const angle = Math.atan2(tangent.y, tangent.x) * 180 / Math.PI + (link.manualTokenInvert ? 180 : 0);
+            const r = Math.max(8, Math.min(12, tokenR + 2));
+            return (
+              <Group x={point.x} y={point.y} listening={false}>
+                <Circle radius={r + 3} fill={tokenStroke} opacity={0.18} />
+                <Circle radius={r} fill={tokenFill} stroke={tokenStroke} strokeWidth={2} />
+                <Group rotation={angle}>
+                  <Line
+                    points={[-r * 0.32, -r * 0.45, r * 0.5, 0, -r * 0.32, r * 0.45]}
+                    closed
+                    fill={tokenStroke}
+                    stroke={tokenStroke}
+                    strokeWidth={1}
+                    lineJoin="round"
+                  />
+                </Group>
+              </Group>
+            );
+          })()}
         </>
       )}
 

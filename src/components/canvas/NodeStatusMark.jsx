@@ -1,6 +1,7 @@
 import React from 'react';
 import { Circle, Group, Line, Rect, Text } from 'react-konva';
 import { pageColors } from '../../colorThemes';
+import { getFailureMarkGeometry } from '../../animation/nodeFailureStyle';
 
 export function getNodeStatusStroke(node, fallback) {
   if (node?.failing) return pageColors.dangerBright;
@@ -20,8 +21,7 @@ export default function NodeStatusMark({ node }) {
   const hasFailureMark = !!node?.failing || (node?.failureKeyframes?.length ?? 0) > 0;
   const cx = node.width / 2;
   const cy = node.height / 2;
-  const size = Math.max(9, Math.min(node.width, node.height) * 0.28);
-  const strokeWidth = Math.max(2.5, (node.strokeWidth ?? 2) * 1.1);
+  const fail = getFailureMarkGeometry(node);
   const width = Math.min(54, Math.max(44, node.width - 12));
   const height = 14;
   const x = 6;
@@ -33,10 +33,18 @@ export default function NodeStatusMark({ node }) {
     <>
       {hasFailureMark && (
         <Group id={`node-fail-${node.id}`} x={cx} y={cy} opacity={node.failing ? 1 : 0} listening={false}>
-        <Circle radius={size + 7} fill={pageColors.dangerMain} opacity={0.18} />
-        <Circle radius={size + 3} stroke={pageColors.dangerBright} strokeWidth={1} opacity={0.35} />
-        <Line points={[-size, -size, size, size]} stroke={pageColors.dangerBright} strokeWidth={strokeWidth} lineCap="round" />
-        <Line points={[size, -size, -size, size]} stroke={pageColors.dangerBright} strokeWidth={strokeWidth} lineCap="round" />
+        {fail.halo && (
+          <>
+            <Circle radius={fail.halo.glowRadius} fill={fail.style.color} opacity={0.18} />
+            <Circle radius={fail.halo.ringRadius} stroke={fail.style.color} strokeWidth={1} opacity={0.35} />
+          </>
+        )}
+        {fail.ring != null && (
+          <Circle radius={fail.ring} stroke={fail.style.color} strokeWidth={fail.strokeWidth} />
+        )}
+        {fail.lines.map((points, i) => (
+          <Line key={i} points={points} stroke={fail.style.color} strokeWidth={fail.strokeWidth} lineCap="round" />
+        ))}
         </Group>
       )}
       {node?.offline && (

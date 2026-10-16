@@ -1,3 +1,5 @@
+import { getFailureMarkGeometry, getFailureTintStrength, getLinkFailureMarkGeometry, getLinkFailureStyle, getLinkFailureTintStrength, getNodeFailureStyle } from '../animation/nodeFailureStyle';
+import { getCustomShapeOutline } from '../shapes/customShape';
 import Konva from 'konva';
 import { FFmpeg } from '@ffmpeg/ffmpeg';
 import { toBlobURL } from '@ffmpeg/util';
@@ -107,9 +109,14 @@ function normalizePopupSnapshotNodes(snapshotNodes = []) {
   );
 }
 
-function makeBodyShape(shapeKind, w, h, cornerRadius, fill, stroke, strokeWidth, id) {
+function makeBodyShape(shapeKind, w, h, cornerRadius, fill, stroke, strokeWidth, id, customShape = null) {
   const common = { fill, stroke, strokeWidth };
   if (id) common.id = id;
+
+  if (shapeKind === 'custom') {
+    const outline = getCustomShapeOutline(customShape, w, h);
+    if (outline) return new Konva.Line({ points: outline, closed: true, ...common });
+  }
 
   if (shapeKind === 'diamond') {
     return new Konva.Line({ points: [w / 2, 0, w, h / 2, w / 2, h, 0, h / 2], closed: true, ...common });
@@ -187,7 +194,7 @@ function addSnapshotNode(layer, node) {
     const fill = node.fill ?? pageColors.blueNodeFill;
     const stroke = node.stroke ?? pageColors.blueNodeStroke;
     const strokeWidth = node.strokeWidth ?? 2;
-    const body = makeBodyShape(node.shape ?? 'rounded', w, h, node.cornerRadius, fill, stroke, strokeWidth, `node-body-${node.id}`);
+    const body = makeBodyShape(node.shape ?? 'rounded', w, h, node.cornerRadius, fill, stroke, strokeWidth, `node-body-${node.id}`, node.customShape);
     body.setAttr('baseFill', fill);
     body.setAttr('baseStroke', stroke);
     body.setAttr('baseStrokeWidth', strokeWidth);
@@ -199,12 +206,14 @@ function addSnapshotNode(layer, node) {
       w,
       h,
       node.cornerRadius,
-      pageColors.dangerSurfaceSoft,
+      getNodeFailureStyle(node).color,
       pageColors.transparent,
       0,
       `node-fail-tint-${node.id}`,
+      node.customShape,
     );
-    failTint.opacity(node.failing ? 1 : 0);
+    failTint.setAttr('failTintStrength', getFailureTintStrength(node));
+    failTint.opacity(node.failing ? getFailureTintStrength(node) : 0);
     failTint.listening(false);
     group.add(failTint);
   }
@@ -239,8 +248,7 @@ function addSnapshotNode(layer, node) {
 
   group.add(lbl, morphLbl);
   if (node.failing || (node.failureKeyframes?.length ?? 0) > 0) {
-    const failSize = Math.max(9, Math.min(w, h) * 0.28);
-    const failStrokeWidth = Math.max(2.5, (node.strokeWidth ?? 2) * 1.1);
+    const fail = getFailureMarkGeometry(node);
     const failMark = new Konva.Group({
       id: `node-fail-${node.id}`,
       x: w / 2,
@@ -248,12 +256,18 @@ function addSnapshotNode(layer, node) {
       opacity: node.failing ? 1 : 0,
       listening: false,
     });
-    failMark.add(
-      new Konva.Circle({ radius: failSize + 7, fill: pageColors.dangerMain, opacity: 0.18 }),
-      new Konva.Circle({ radius: failSize + 3, stroke: pageColors.dangerBright, strokeWidth: 1, opacity: 0.35 }),
-      new Konva.Line({ points: [-failSize, -failSize, failSize, failSize], stroke: pageColors.dangerBright, strokeWidth: failStrokeWidth, lineCap: 'round' }),
-      new Konva.Line({ points: [failSize, -failSize, -failSize, failSize], stroke: pageColors.dangerBright, strokeWidth: failStrokeWidth, lineCap: 'round' }),
-    );
+    if (fail.halo) {
+      failMark.add(
+        new Konva.Circle({ radius: fail.halo.glowRadius, fill: fail.style.color, opacity: 0.18 }),
+        new Konva.Circle({ radius: fail.halo.ringRadius, stroke: fail.style.color, strokeWidth: 1, opacity: 0.35 }),
+      );
+    }
+    if (fail.ring != null) {
+      failMark.add(new Konva.Circle({ radius: fail.ring, stroke: fail.style.color, strokeWidth: fail.strokeWidth }));
+    }
+    for (const points of fail.lines) {
+      failMark.add(new Konva.Line({ points, stroke: fail.style.color, strokeWidth: fail.strokeWidth, lineCap: 'round' }));
+    }
     group.add(failMark);
   }
   layer.add(group);
@@ -262,7 +276,8 @@ function addSnapshotNode(layer, node) {
 function addSnapshotLink(layer, link, fromNode, toNode, allLinks, allNodes) {
   const render = buildLinkRenderData(link, fromNode, toNode, allLinks, allNodes);
   if (!render) return;
-  const color = link.failing ? pageColors.dangerBright : (link.stroke ?? pageColors.blueNodeStroke);
+  const failStyle = getLinkFailureStyle(link);
+  const color = link.failing && failStyle.tint ? failStyle.color : (link.stroke ?? pageColors.blueNodeStroke);
   const sw = link.strokeWidth ?? 2;
 
   const shaft = new Konva.Path({
@@ -283,7 +298,8 @@ function addSnapshotLink(layer, link, fromNode, toNode, allLinks, allNodes) {
   const failOverlay = new Konva.Path({
     id: `link-shaft-fail-overlay-${link.id}`,
     data: render.pathData,
-    stroke: pageColors.dangerBright,
+    stroke: failStyle.color,
+    failTintStrength: getLinkFailureTintStrength(link),
     strokeWidth: sw,
     lineCap: 'round',
     lineJoin: 'round',
@@ -292,8 +308,7 @@ function addSnapshotLink(layer, link, fromNode, toNode, allLinks, allNodes) {
   });
 
   const midpoint = getPointAtProgress(render, 0.5, true)?.point ?? render.endPoint;
-  const failSize = Math.max(7, 4 + sw * 1.4);
-  const failStrokeWidth = Math.max(2, sw * 0.85);
+  const fail = getLinkFailureMarkGeometry(link);
   const failMark = new Konva.Group({
     id: `link-fail-${link.id}`,
     x: midpoint.x,
@@ -301,12 +316,18 @@ function addSnapshotLink(layer, link, fromNode, toNode, allLinks, allNodes) {
     opacity: link.failing ? 1 : 0,
     listening: false,
   });
-  failMark.add(
-    new Konva.Circle({ radius: failSize + 6, fill: pageColors.dangerMain, opacity: 0.18 }),
-    new Konva.Circle({ radius: failSize + 2, stroke: pageColors.dangerBright, strokeWidth: 1, opacity: 0.35 }),
-    new Konva.Line({ points: [-failSize, -failSize, failSize, failSize], stroke: pageColors.dangerBright, strokeWidth: failStrokeWidth, lineCap: 'round' }),
-    new Konva.Line({ points: [failSize, -failSize, -failSize, failSize], stroke: pageColors.dangerBright, strokeWidth: failStrokeWidth, lineCap: 'round' }),
-  );
+  if (fail.halo) {
+    failMark.add(
+      new Konva.Circle({ radius: fail.halo.glowRadius, fill: fail.style.color, opacity: 0.18 }),
+      new Konva.Circle({ radius: fail.halo.ringRadius, stroke: fail.style.color, strokeWidth: 1, opacity: 0.35 }),
+    );
+  }
+  if (fail.ring != null) {
+    failMark.add(new Konva.Circle({ radius: fail.ring, stroke: fail.style.color, strokeWidth: fail.strokeWidth }));
+  }
+  for (const points of fail.lines) {
+    failMark.add(new Konva.Line({ points, stroke: fail.style.color, strokeWidth: fail.strokeWidth, lineCap: 'round' }));
+  }
 
   layer.add(shaft, failOverlay, head, failMark);
 }
@@ -361,6 +382,9 @@ function buildPopupOverlay(snapshotNodes, snapshotLinks, nestedEngine) {
   const nestedWebByLinkId = buildWebByLinkId(nestedWebs);
   const nestedManualTokenTimingById = computeManualTokenTimingByLinkId(snapshotLinks, nestedTimeline);
   const nestedFailingById = Object.fromEntries(snapshotLinks.map(link => [link.id, !!link.failing]));
+  const nestedLinkFailureById = Object.fromEntries(snapshotLinks
+    .filter(link => link.failureKeyframes?.length)
+    .map(link => [link.id, { failureKeyframes: link.failureKeyframes }]));
   const nestedFailAtEndsById = Object.fromEntries(snapshotLinks.map(link => [link.id, !!link.failAtEnds]));
   const nestedFailOnTokenEndById = Object.fromEntries(snapshotLinks.map(link => [link.id, !!link.failOnTokenEnd]));
   const nestedMonitors = snapshotNodes.filter(n => n.type === 'monitor');
@@ -368,7 +392,7 @@ function buildPopupOverlay(snapshotNodes, snapshotLinks, nestedEngine) {
   return {
     offStage, bgLayer, contentLayer, container,
     nestedLinkRenders, nestedWebs, nestedWebByLinkId,
-    nestedManualTokenTimingById, nestedFailingById, nestedFailAtEndsById, nestedFailOnTokenEndById, nestedMonitors,
+    nestedManualTokenTimingById, nestedFailingById, nestedLinkFailureById, nestedFailAtEndsById, nestedFailOnTokenEndById, nestedMonitors,
   };
 }
 
@@ -681,6 +705,7 @@ async function renderPopupFrameDataUrl(popupWindow, localTime, overlayPixelRatio
     webByLinkId: overlayInfo.nestedWebByLinkId,
     manualTokenTimingById: overlayInfo.nestedManualTokenTimingById,
     failingById: overlayInfo.nestedFailingById,
+    linkFailureById: overlayInfo.nestedLinkFailureById,
     failAtEndsById: overlayInfo.nestedFailAtEndsById,
     failOnTokenEndById: overlayInfo.nestedFailOnTokenEndById,
     monitors: overlayInfo.nestedMonitors,
@@ -751,6 +776,9 @@ export async function exportToMP4({
   const failAtEndsById = Object.fromEntries(links.map(l => [l.id, !!l.failAtEnds]));
   const failOnTokenEndById = Object.fromEntries(links.map(l => [l.id, !!l.failOnTokenEnd]));
   const failingById = Object.fromEntries(links.map(l => [l.id, !!l.failing]));
+  const linkFailureById = Object.fromEntries(links
+    .filter(l => l.failureKeyframes?.length)
+    .map(l => [l.id, { failureKeyframes: l.failureKeyframes }]));
 
   const stageW = stage.width();
   const stageH = stage.height();
@@ -814,6 +842,7 @@ export async function exportToMP4({
       failAtEndsById,
       failOnTokenEndById,
       failingById,
+      linkFailureById,
       isPlaying: true,
     });
     layer.draw();
@@ -1000,6 +1029,9 @@ export async function renderAnimationClipToMP4({
   const failAtEndsById = Object.fromEntries(links.map(l => [l.id, !!l.failAtEnds]));
   const failOnTokenEndById = Object.fromEntries(links.map(l => [l.id, !!l.failOnTokenEnd]));
   const failingById = Object.fromEntries(links.map(l => [l.id, !!l.failing]));
+  const linkFailureById = Object.fromEntries(links
+    .filter(l => l.failureKeyframes?.length)
+    .map(l => [l.id, { failureKeyframes: l.failureKeyframes }]));
 
   const stageW = stage.width();
   const stageH = stage.height();
@@ -1059,6 +1091,7 @@ export async function renderAnimationClipToMP4({
       failAtEndsById,
       failOnTokenEndById,
       failingById,
+      linkFailureById,
       isPlaying: true,
     });
     layer.draw();

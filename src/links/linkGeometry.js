@@ -129,7 +129,20 @@ export function getClosestNodeOutlinePosition(node, canvasPoint, offset = { x: 0
   };
 }
 
+// Anchors placed at an exact spot (e.g. on a custom shape outline) store their position
+// as fractions of the node box in posX/posY.
+function hasExactAnchorPosition(anchorLike) {
+  return Number.isFinite(anchorLike?.posX) && Number.isFinite(anchorLike?.posY);
+}
+
 export function getNodeAnchorPoint(node, anchorLike, offset = { x: 0, y: 0 }) {
+  if (hasExactAnchorPosition(anchorLike)) {
+    return {
+      x: node.x + anchorLike.posX * node.width + offset.x,
+      y: node.y + anchorLike.posY * node.height + offset.y,
+    };
+  }
+
   if (!anchorLike) {
     const center = getNodeCenter(node);
     return { x: center.x + offset.x, y: center.y + offset.y };
@@ -373,6 +386,41 @@ function getEndpointDescriptor(link, node, oppositeNode, allLinks = [], isStart)
   let side = explicitSide;
   let desiredAlong;
   let sortAlong;
+
+  if (explicitAnchor && hasExactAnchorPosition(explicitAnchor)) {
+    // Exact anchors attach exactly where they were placed and don't share lanes.
+    return {
+      usesBoundaryAnchor: false,
+      side: explicitAnchor.side,
+      desiredAlong: explicitAnchor.along ?? 0,
+      sortAlong: explicitAnchor.along ?? 0,
+      fallbackPoint: getNodeAnchorPoint(node, explicitAnchor),
+      anchorId: explicitAnchor.id,
+      lockCenter: false,
+    };
+  }
+
+  // Nodes whose default side anchors were replaced (custom shape editor) attach links
+  // that aren't pinned to an anchor at the anchor nearest the other end.
+  const customAnchors = node.customAnchorsOnly ? (node.anchors ?? []) : [];
+  if (!explicitAnchor && customAnchors.length && explicitSide !== 'center') {
+    let best = null;
+    let bestDist = Infinity;
+    for (const anchor of customAnchors) {
+      const point = getNodeAnchorPoint(node, anchor);
+      const d = dist(point, targetPoint);
+      if (d < bestDist) { best = { anchor, point }; bestDist = d; }
+    }
+    return {
+      usesBoundaryAnchor: false,
+      side: best.anchor.side,
+      desiredAlong: best.anchor.along ?? 0,
+      sortAlong: best.anchor.along ?? 0,
+      fallbackPoint: best.point,
+      anchorId: best.anchor.id,
+      lockCenter: false,
+    };
+  }
 
   if (explicitAnchor) {
     return {

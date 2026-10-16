@@ -178,6 +178,7 @@ export function buildMirrorBinding(mirror, nodes, links) {
       label: override.label ?? sourceNode.label,
       type: sourceNode.type,
       shape: sourceNode.shape,
+      customShape: sourceNode.customShape,
       textMorphs: sourceNode.textMorphs ?? [],
       triggerAfterLinkId: null,
       anchors: (sourceNode.anchors ?? []).map(anchor => ({

@@ -88,6 +88,78 @@ describe('AnimationEngine timeline', () => {
     );
     expect(engine.getContentDuration()).toBeGreaterThanOrEqual(10);
   });
+
+  it('extends content duration to cover link failure keyframes', () => {
+    const engine = new AnimationEngine(
+      [node('a'), node('b')],
+      [{ id: 'l1', fromId: 'a', toId: 'b', failureKeyframes: [{ id: 'f1', startTime: 12, duration: 1 }] }]
+    );
+    expect(engine.getContentDuration()).toBeGreaterThanOrEqual(13);
+  });
+});
+
+describe('AnimationEngine event triggers', () => {
+  const startOf = (engine, id) => engine.getTimeline().find(e => e.type === 'node' && e.id === id).start;
+
+  it('starts a node when another node failure completes', () => {
+    const engine = new AnimationEngine([
+      node('a', { failureKeyframes: [{ id: 'f', startTime: 4, duration: 1 }] }),
+      node('b', { triggerEventId: 'failure:a:f', triggerMode: 'on-end' }),
+    ], []);
+    expect(startOf(engine, 'b')).toBeCloseTo(5);
+  });
+
+  it('applies the trigger delay', () => {
+    const engine = new AnimationEngine([
+      node('a', { failureKeyframes: [{ id: 'f', startTime: 4, duration: 1 }] }),
+      node('b', { triggerEventId: 'failure:a:f', triggerMode: 'on-end', triggerDelay: 0.5 }),
+    ], []);
+    expect(startOf(engine, 'b')).toBeCloseTo(5.5);
+  });
+
+  it('settles chains of triggers', () => {
+    const engine = new AnimationEngine([
+      node('a', { animStartTime: 2, animDuration: 1 }),
+      node('b', { triggerEventId: 'node:a', triggerMode: 'on-end' }),
+      node('c', { triggerEventId: 'node:b', triggerMode: 'on-end' }),
+    ], []);
+    const bEnd = startOf(engine, 'b') + engine.getTimeline().find(e => e.id === 'b').duration;
+    expect(startOf(engine, 'b')).toBeCloseTo(3);
+    expect(startOf(engine, 'c')).toBeCloseTo(bEnd);
+  });
+
+  it('starts a token-triggered node only once the token has arrived', () => {
+    const engine = new AnimationEngine(
+      [node('a'), node('b'), node('c', { triggerEventId: 'token:l', triggerMode: 'overlap' })],
+      [link('l', 'a', 'b', { manualTokenEnabled: true, manualTokenDuration: 2 })]
+    );
+    const linkEvent = engine.getTimeline().find(e => e.type === 'link' && e.id === 'l');
+    expect(startOf(engine, 'c')).toBeCloseTo(linkEvent.start + 2);
+  });
+
+  it('starts an event-triggered link when the event ends', () => {
+    const engine = new AnimationEngine(
+      [node('a', { failureKeyframes: [{ id: 'f', startTime: 6, duration: 1 }] }), node('b')],
+      [link('l', 'a', 'b', { triggerEventId: 'failure:a:f' })]
+    );
+    expect(engine.getTimeline().find(e => e.type === 'link' && e.id === 'l').start).toBeCloseTo(7);
+  });
+
+  it('moves link-triggered nodes along with an event-triggered link', () => {
+    const engine = new AnimationEngine(
+      [
+        node('a', { failureKeyframes: [{ id: 'f', startTime: 6, duration: 1 }] }),
+        node('b', { triggerAfterLinkId: 'l', triggerMode: 'on-end' }),
+      ],
+      [link('l', 'a', 'b', { triggerEventId: 'failure:a:f', animDuration: 0.5 })]
+    );
+    expect(startOf(engine, 'b')).toBeCloseTo(7.5);
+  });
+
+  it('falls back gracefully when the event no longer exists', () => {
+    const engine = new AnimationEngine([node('b', { triggerEventId: 'failure:gone:f' })], []);
+    expect(Number.isFinite(startOf(engine, 'b'))).toBe(true);
+  });
 });
 
 describe('AnimationEngine.getStateAtTime', () => {
@@ -133,5 +205,34 @@ describe('AnimationEngine variable webs', () => {
     expect(webs).toHaveLength(1);
     // Hop waits for both the variable draw end (1) and the link draw end (2).
     expect(webs[0].tokenTiming.l1.start).toBeCloseTo(2);
+  });
+});
+
+describe('blueprint items', () => {
+  const bpNode = (id, o = {}) => ({ id, type: 'node', label: id, x: 0, y: 0, width: 100, height: 50, ...o });
+  const bpLink = (id, fromId, toId, o = {}) => ({ id, fromId, toId, joints: [], ...o });
+
+  it('are fully visible at every time and take no slot in the sequence', () => {
+    const nodes = [bpNode('a', { blueprint: true }), bpNode('b', { blueprint: true }), bpNode('c')];
+    const links = [bpLink('l', 'a', 'b', { blueprint: true })];
+    const engine = new AnimationEngine(nodes, links);
+    const state = engine.getStateAtTime(0);
+    expect(state.nodeStates.a.opacity).toBe(1);
+    expect(state.nodeStates.b.opacity).toBe(1);
+    expect(state.linkStates.l.progress).toBe(1);
+    // The live node starts where it would without the blueprint items.
+    const alone = new AnimationEngine([bpNode('c')], []);
+    const startOf = (eng, id) => eng.getTimeline().find(e => e.id === id).start;
+    expect(startOf(engine, 'c')).toBe(startOf(alone, 'c'));
+  });
+
+  it('join the timeline once triggered', () => {
+    const nodes = [bpNode('a'), bpNode('b', { blueprint: true, triggerEventId: 'node:a' })];
+    const engine = new AnimationEngine(nodes, []);
+    const a = engine.getTimeline().find(e => e.id === 'a');
+    const b = engine.getTimeline().find(e => e.id === 'b');
+    expect(b.blueprint).toBeFalsy();
+    expect(b.start).toBeGreaterThan(a.start);
+    expect(engine.getStateAtTime(0).nodeStates.b.opacity).toBe(0);
   });
 });

@@ -479,6 +479,8 @@ const SUBDIAGRAM_DEFAULTS = {
     manualTokenEnabled: false,
     // 'start' → begin X sec after link begins; 'end' → begin X sec after link completes
     manualTokenAnchor: 'start',
+    // Event id that starts the token instead (anchor is then ignored; delay still applies).
+    manualTokenTriggerEventId: null,
     manualTokenDelay: 0,
     // null preserves the link animation duration until the user sets a travel time.
     manualTokenDuration: null,
@@ -511,6 +513,7 @@ function normalizeLink(link) {
     joints: (link.joints ?? []).map(joint => ({ ...joint })),
     tokenHopOverrides: { ...(link.tokenHopOverrides ?? {}) },
     manualTokenTextKeyframes: (link.manualTokenTextKeyframes ?? []).map(kf => ({ ...kf })),
+    failureKeyframes: normalizeNodeFailureKeyframes(link.failureKeyframes ?? []),
   };
 }
 
@@ -581,6 +584,33 @@ function getTextNodeSize(label, fontSize, textPadX = TEXT_NODE_DEFAULTS.textPadX
     width: Math.max(44, Math.ceil(widestLine + textPadX * 2)),
     height: Math.max(26, Math.ceil(lines.length * fontSize * lineHeight + textPadY * 2)),
   };
+}
+
+// Editor modes: 'live' (default) puts new items on the animation timeline; 'blueprint'
+// adds them as always-visible items outside the timeline, to be animated later by
+// wiring them up with events (see isBlueprintItem in AnimationEngine).
+export const EDITOR_MODES = ['live', 'blueprint'];
+const EDITOR_MODE_KEY = 'iris-editor-mode';
+
+function loadEditorMode() {
+  try {
+    const mode = localStorage.getItem(EDITOR_MODE_KEY);
+    return EDITOR_MODES.includes(mode) ? mode : 'live';
+  } catch {
+    return 'live';
+  }
+}
+
+function saveEditorMode(mode) {
+  try { localStorage.setItem(EDITOR_MODE_KEY, mode); } catch { /* storage unavailable */ }
+}
+
+// Fields for a newly added item in the current mode: in blueprint mode it gets no
+// start time, so it stays off the timeline until it's triggered or timed.
+function creationTiming(state, cursor) {
+  return state.editorMode === 'blueprint'
+    ? { blueprint: true, animStartTime: null }
+    : { animStartTime: cursor };
 }
 
 function normalizeNode(node, updates = {}) {
@@ -788,6 +818,10 @@ const useStore = create((set, get) => ({
   // Empty list → auto-determine segments from keyframes.
   slideBreaks: [],
 
+  // User-set end of the timeline (seconds). Playback always runs to this point.
+  // null → automatic (end of content / last slide break, minimum 4s).
+  timelineEnd: null,
+
   // Capture frame representing the render viewport in canvas coordinates
   // Defaults to Google Slides/PPT size (1920x1080) at origin; draggable overlay in canvas
   captureFrame: { x: 0, y: 0, width: PPTX_EXPORT_SIZE.width, height: PPTX_EXPORT_SIZE.height, visible: true },
@@ -828,6 +862,17 @@ const useStore = create((set, get) => ({
   activeProject: null,
   expandedSubdiagramId: null,
 
+  editorMode: loadEditorMode(),
+  setEditorMode: (mode) => {
+    if (!EDITOR_MODES.includes(mode)) return;
+    saveEditorMode(mode);
+    set({ editorMode: mode });
+  },
+  cycleEditorMode: () => {
+    const index = EDITOR_MODES.indexOf(get().editorMode);
+    get().setEditorMode(EDITOR_MODES[(index + 1) % EDITOR_MODES.length]);
+  },
+
   setActiveProject: (meta) => set({ activeProject: meta }),
   setExpandedSubdiagramId: (id) => set({ expandedSubdiagramId: id }),
 
@@ -836,7 +881,7 @@ const useStore = create((set, get) => ({
 
   // Extended loader that accepts optional slideBreaks without breaking callers
   // Keep signature-compatible; allow passing { nodes, links, slideBreaks }.
-  loadProjectData: ({ nodes, links, slideBreaks = [], captureFrame = null }) =>
+  loadProjectData: ({ nodes, links, slideBreaks = [], captureFrame = null, timelineEnd = null }) =>
     set({
       nodes: nodes.map(node => normalizeNode(node)),
       links: links.map(link => normalizeLink(link)),
@@ -852,6 +897,7 @@ const useStore = create((set, get) => ({
             .filter(v => v != null)
           )].sort((a, b) => a - b)
         : [],
+      timelineEnd: Number.isFinite(timelineEnd) && timelineEnd > 0 ? Math.round(timelineEnd * 100) / 100 : null,
       captureFrame: captureFrame && Number.isFinite(captureFrame.width) && Number.isFinite(captureFrame.height)
         ? {
             x: Number(captureFrame.x) || 0,
@@ -1176,7 +1222,7 @@ const useStore = create((set, get) => ({
       ...NODE_DEFAULTS,
       ...preset,
       ...overrides,
-      animStartTime: cursor,
+      ...creationTiming(get(), cursor),
       label: overrides.label ?? `Node ${get().nodes.filter(node => node.type !== 'text').length + 1}`,
     });
     set(state => ({
@@ -1205,7 +1251,7 @@ const useStore = create((set, get) => ({
       textColor: pageColors.white,
       textAnimMode: 'fade',
       anchors: [],
-      animStartTime: cursor,
+      ...creationTiming(get(), cursor),
       animDuration: null,
       triggerAfterLinkId: null,
       triggerMode: 'overlap',
@@ -1231,7 +1277,7 @@ const useStore = create((set, get) => ({
     get()._pushHistory();
     const id = uuid();
     const cursor = Math.max(0, Math.round((getTimelineCursor() || 0) * 100) / 100);
-    const node = normalizeNode({ id, ...VARIABLE_NODE_DEFAULTS, animStartTime: cursor });
+    const node = normalizeNode({ id, ...VARIABLE_NODE_DEFAULTS, ...creationTiming(get(), cursor) });
     set(state => ({
       nodes: [...state.nodes, { ...node, x: canvasX - node.width / 2, y: canvasY - node.height / 2 }],
       contextMenu: null,
@@ -1249,7 +1295,7 @@ const useStore = create((set, get) => ({
     const node = {
       id,
       ...MONITOR_NODE_DEFAULTS,
-      animStartTime: cursor,
+      ...creationTiming(get(), cursor),
       monitorWatches: [],
     };
     set(state => ({
@@ -1266,7 +1312,7 @@ const useStore = create((set, get) => ({
     get()._pushHistory();
     const id = uuid();
     const cursor = Math.max(0, Math.round((getTimelineCursor() || 0) * 100) / 100);
-    const node = normalizeNode({ id, ...GRAPH_NODE_DEFAULTS, animStartTime: cursor });
+    const node = normalizeNode({ id, ...GRAPH_NODE_DEFAULTS, ...creationTiming(get(), cursor) });
     set(state => ({
       nodes: [...state.nodes, { ...node, x: canvasX - node.width / 2, y: canvasY - node.height / 2 }],
       contextMenu: null,
@@ -1465,7 +1511,7 @@ const useStore = create((set, get) => ({
     const node = {
       id,
       ...SUBDIAGRAM_DEFAULTS,
-      animStartTime: cursor,
+      ...creationTiming(get(), cursor),
       x: canvasX - SUBDIAGRAM_DEFAULTS.width / 2,
       y: canvasY - SUBDIAGRAM_DEFAULTS.height / 2,
     };
@@ -1485,7 +1531,7 @@ const useStore = create((set, get) => ({
     const area = {
       id,
       ...AREA_DEFAULTS,
-      animStartTime: cursor,
+      ...creationTiming(get(), cursor),
       x: canvasX - AREA_DEFAULTS.width / 2,
       y: canvasY - AREA_DEFAULTS.height / 2,
     };
@@ -1572,6 +1618,7 @@ const useStore = create((set, get) => ({
         ...LINK_DEFAULTS,
         ...state.nextLinkDefaults,
         ...overrides,
+        ...(state.editorMode === 'blueprint' ? { blueprint: true } : {}),
         joints: [...(state.nextLinkDefaults.joints ?? [])],
       }],
       selectedId: id,
@@ -1856,6 +1903,9 @@ const useStore = create((set, get) => ({
     return { slideBreaks: [...next].sort((a, b) => a - b) };
   }),
   clearSlideBreaks: () => set({ slideBreaks: [] }),
+  setTimelineEnd: (t) => set({
+    timelineEnd: Number.isFinite(t) && t > 0 ? Math.max(0.1, Math.round(t * 100) / 100) : null,
+  }),
 
   // Capture frame actions
   setCaptureFrame: (updates) => set(state => ({

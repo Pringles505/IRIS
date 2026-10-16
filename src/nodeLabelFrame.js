@@ -25,6 +25,10 @@ export function getNodeLabelFrame(node, options = {}) {
     padY = Math.max(12, h * 0.18);
   } else if (node?.shape === 'rounded') {
     padX = Math.max(padX, 14 + (node.cornerRadius ?? 10) * 0.45);
+  } else if (node?.shape === 'custom') {
+    // Free-form outlines can pinch in anywhere; keep the label well inside.
+    padX = Math.max(20, w * 0.16);
+    padY = Math.max(10, h * 0.16);
   } else if (node?.shape === 'protocol') {
     // Keep the label clear of the side connector pins.
     padX = Math.max(18, w * 0.13);

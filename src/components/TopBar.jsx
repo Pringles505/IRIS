@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
+import EventsMenu from './EventsMenu';
 import useStore from '../store/useStore';
 import { exportGifPackageZip } from '../export/GifPackageExporter';
 import { writeProject, downloadProjectFile, parseProjectFile } from '../projects/projectStore';
@@ -46,11 +47,12 @@ const resMap = {
 
 function TopBar({ stageRef, layerRef, onGoHome, onTogglePreview }) {
   const {
-    nodes, links, slideBreaks, captureFrame,
+    nodes, links, slideBreaks, captureFrame, timelineEnd,
     activeProject, renameActiveProject,
     isExporting, exportProgress, exportStatus,
     setExporting, setExportProgress, setExportStatus,
     alignment, setAlignment,
+    editorMode, cycleEditorMode,
   } = useStore();
 
   const fileInputRef     = useRef(null);
@@ -139,7 +141,7 @@ function TopBar({ stageRef, layerRef, onGoHome, onTogglePreview }) {
 
   const handleDownload = () => {
     if (!activeProject) return;
-    downloadProjectFile({ version: 1, ...activeProject, nodes, links, slideBreaks, captureFrame });
+    downloadProjectFile({ version: 1, ...activeProject, nodes, links, slideBreaks, captureFrame, timelineEnd });
   };
 
   const handleOpenFile = (e) => {
@@ -152,7 +154,7 @@ function TopBar({ stageRef, layerRef, onGoHome, onTogglePreview }) {
         const project = parseProjectFile(ev.target.result);
         writeProject(project);
         setActiveProject({ id: project.id, name: project.name, createdAt: project.createdAt });
-        loadProjectData({ nodes: project.nodes, links: project.links, slideBreaks: project.slideBreaks ?? project.slides ?? [], captureFrame: project.captureFrame ?? null });
+        loadProjectData({ nodes: project.nodes, links: project.links, slideBreaks: project.slideBreaks ?? project.slides ?? [], captureFrame: project.captureFrame ?? null, timelineEnd: project.timelineEnd ?? null });
       } catch (err) {
         alert(`Could not open file:\n${err.message}`);
       }
@@ -164,7 +166,7 @@ function TopBar({ stageRef, layerRef, onGoHome, onTogglePreview }) {
   const commitName = () => {
     const name = nameVal.trim() || 'Untitled';
     renameActiveProject(name);
-    if (activeProject) writeProject({ version: 1, ...activeProject, name, nodes, links, slideBreaks, captureFrame });
+    if (activeProject) writeProject({ version: 1, ...activeProject, name, nodes, links, slideBreaks, captureFrame, timelineEnd });
     setEditingName(false);
   };
 
@@ -302,6 +304,19 @@ function TopBar({ stageRef, layerRef, onGoHome, onTogglePreview }) {
         )}
       </div>
 
+      {/* Editor mode — Tab switches it too */}
+      <button
+        onClick={cycleEditorMode}
+        className={`mode-badge mode-badge--${editorMode}`}
+        title={editorMode === 'blueprint'
+          ? 'Blueprint: new items are always visible and stay off the timeline — animate them from the event cascade. Click or press Tab to switch.'
+          : 'Live animation: new items join the animation timeline. Click or press Tab to switch.'}
+      >
+        <span className="mode-badge__dot" />
+        {editorMode === 'blueprint' ? 'Blueprint' : 'Live animation'}
+        <kbd className="mode-badge__key">Tab</kbd>
+      </button>
+
       <VDivider />
 
       {/* ── Menu bar ── */}
@@ -339,6 +354,8 @@ function TopBar({ stageRef, layerRef, onGoHome, onTogglePreview }) {
         <DropMenu label="Settings" open={openMenu === 'settings'} onToggle={() => toggleMenu('settings')} onClose={closeMenu}>
           <MItem label="Loop frames…" onClick={() => { closeMenu(); setLoopPopupOpen(true); }} />
         </DropMenu>
+
+        <EventsMenu open={openMenu === 'events'} onToggle={() => toggleMenu('events')} onClose={closeMenu} />
 
       </div>
 

@@ -14,6 +14,7 @@ import {
 } from './projects/projectStore';
 import { capturePreview } from './projects/capturePreview';
 import { docsNav } from './docsNav';
+import { useTriggeredKeyframeSync } from './events/useTriggeredKeyframeSync';
 
 const AUTOSAVE_DELAY = 1500;
 
@@ -32,7 +33,7 @@ function App() {
   }, []);
 
   const {
-    nodes, links, slideBreaks, captureFrame,
+    nodes, links, slideBreaks, captureFrame, timelineEnd,
     activeProject, setActiveProject,
     loadProjectData,
   } = useStore();
@@ -50,7 +51,7 @@ function App() {
       const project = readProject(lastId);
       if (project) {
         setActiveProject({ id: project.id, name: project.name, createdAt: project.createdAt });
-        loadProjectData({ nodes: project.nodes, links: project.links, slideBreaks: project.slideBreaks ?? project.slides ?? [], captureFrame: project.captureFrame ?? null });
+        loadProjectData({ nodes: project.nodes, links: project.links, slideBreaks: project.slideBreaks ?? project.slides ?? [], captureFrame: project.captureFrame ?? null, timelineEnd: project.timelineEnd ?? null });
         setPage('editor');
         return;
       }
@@ -73,10 +74,10 @@ function App() {
     if (!ap) return;
     clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(() => {
-      reportSaveResult(writeProject({ version: 1, ...ap, nodes, links, slideBreaks, captureFrame }));
+      reportSaveResult(writeProject({ version: 1, ...ap, nodes, links, slideBreaks, captureFrame, timelineEnd }));
     }, AUTOSAVE_DELAY);
     return () => clearTimeout(saveTimer.current);
-  }, [nodes, links, page, slideBreaks, captureFrame]);
+  }, [nodes, links, page, slideBreaks, captureFrame, timelineEnd]);
 
   useEffect(() => {
     if (!previewMode) { setPreviewBarVisible(false); return; }
@@ -92,12 +93,20 @@ function App() {
   }, [previewMode]);
 
   const playback = usePlayback({ layerRef });
+  useTriggeredKeyframeSync();
   const { isPlaying, play, pause } = playback;
 
   useEffect(() => {
     const onKeyDown = (e) => {
       const tag = document.activeElement?.tagName;
-      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || document.activeElement?.isContentEditable) return;
+      if (e.key === 'Tab' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        // Tab switches the editor mode (live animation ↔ blueprint).
+        if (!stageRef.current) return; // only in the editor
+        e.preventDefault();
+        useStore.getState().cycleEditorMode();
+        return;
+      }
       if (e.code === 'Space') {
         e.preventDefault();
         if (isPlaying) pause(); else play();
@@ -144,7 +153,7 @@ function App() {
 
   const handleOpen = (project) => {
     setActiveProject({ id: project.id, name: project.name, createdAt: project.createdAt });
-    loadProjectData({ nodes: project.nodes, links: project.links, slideBreaks: project.slideBreaks ?? project.slides ?? [], captureFrame: project.captureFrame ?? null });
+    loadProjectData({ nodes: project.nodes, links: project.links, slideBreaks: project.slideBreaks ?? project.slides ?? [], captureFrame: project.captureFrame ?? null, timelineEnd: project.timelineEnd ?? null });
     setLastOpen(project.id);
     setPage('editor');
   };
@@ -157,7 +166,7 @@ function App() {
       let preview;
       try { preview = capturePreview(stageRef, layerRef, nodes, links) ?? undefined; }
       catch (err) { console.error('[App] preview capture failed:', err); }
-      reportSaveResult(writeProject({ version: 1, ...ap, nodes, links, slideBreaks, captureFrame, preview }));
+      reportSaveResult(writeProject({ version: 1, ...ap, nodes, links, slideBreaks, captureFrame, timelineEnd, preview }));
     }
     setLastOpen(null);
     setPage('projects');

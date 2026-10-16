@@ -1,6 +1,7 @@
+import { getNodeFailureOpacity } from './nodeFailureTiming';
 import { buildLinkRenderData, getAnimatedArrowHead, getPointAtProgress } from '../links/linkGeometry';
 import { pageColors } from '../colorThemes';
-import { getManualTokenTextAtTime } from './manualTokenTiming';
+import { getManualTokenTextAtTime, getManualTokenTextFadeAtTime } from './manualTokenTiming';
 import { getNodeTextMorphs, getTextMorphRenderState } from '../text/textMorphs';
 import { formatEquationText } from '../text/equationText';
 
@@ -128,6 +129,12 @@ function ensureBaseAttr(node, attr, fallback) {
 
 const nodeCache = new WeakMap();
 
+// Shapes mount and unmount as the diagram is edited (e.g. a node's failure mark only
+// exists once it has a failure), so callers clear the lookup cache on every edit.
+export function clearAnimNodeCache(layer) {
+  if (layer) nodeCache.delete(layer);
+}
+
 function getCachedNode(layer, selector) {
   let layerCache = nodeCache.get(layer);
   if (!layerCache) {
@@ -135,7 +142,9 @@ function getCachedNode(layer, selector) {
     nodeCache.set(layer, layerCache);
   }
   if (layerCache.has(selector)) {
-    return layerCache.get(selector);
+    const cached = layerCache.get(selector);
+    // A destroyed/detached shape means the tree changed under us; look it up again.
+    if (!cached || cached.getLayer()) return cached;
   }
   const node = layer.findOne(selector);
   layerCache.set(selector, node);
@@ -311,7 +320,7 @@ function applyNodeStateToId(layer, id, state, currentTime = 0) {
   const failTint = getCachedNode(layer, `#node-fail-tint-${id}`);
   if (failTint) {
     const xOpacity = state.failureOpacity ?? (state.opacity < 0.55 ? 0 : Math.min(1, (state.opacity - 0.55) / 0.45));
-    failTint.opacity(xOpacity);
+    failTint.opacity(xOpacity * (failTint.getAttr('failTintStrength') ?? 1));
   }
 
   if (label) {
@@ -414,6 +423,15 @@ function applyNodeStateToId(layer, id, state, currentTime = 0) {
     popupGroup.opacity(p > 0 ? Math.min(1, p * 1.25) : 0);
     popupGroup.setAttr('animDriven', p > 0);
   }
+}
+
+// Tokens fade in over the first moments of their run instead of popping in; they stay
+// fully visible for the rest of the trip so the arrival is never cut short.
+const TOKEN_FADE_IN = 0.15;
+function getTokenFadeIn(elapsed, duration) {
+  const fade = Math.min(TOKEN_FADE_IN, Math.max(0.0001, duration) * 0.3);
+  const t = Math.max(0, Math.min(1, elapsed / fade));
+  return t * t * (3 - 2 * t);
 }
 
 function applyLinkStateToId(layer, id, state, linkRenders, opts = {}, sourceId = id) {
@@ -633,6 +651,9 @@ function applyLinkStateToId(layer, id, state, linkRenders, opts = {}, sourceId =
 
   const failOverlay = getCachedNode(layer, `#link-shaft-fail-overlay-${id}`);
   const tokenEndMode = !!opts.failOnTokenEndById?.[sourceId];
+  // Timed failure keyframe (same behaviour as a node's): animates in over its block, then stays.
+  const timedFailure = opts.linkFailureById?.[sourceId] ?? null;
+  const timedFailureOpacity = timedFailure ? getNodeFailureOpacity(timedFailure, opts.currentTime ?? 0) : 0;
   // Manual token end COMPLETE detection (independent of invert): after start+duration
   const manualHasTiming = !!manualTiming;
   const manualTimingTime = getManualTime(manualTiming);
@@ -650,6 +671,10 @@ function applyLinkStateToId(layer, id, state, linkRenders, opts = {}, sourceId =
       const endT = (manualTiming.start ?? -Infinity) + manualTimingDuration;
       const mix = manualEndReached ? Math.max(0, Math.min(1, (manualTimingTime - endT) / TRANS)) : 0;
       failOverlay.opacity(mix);
+    } else if (timedFailure) {
+      // The overlay covers the whole path, so only recolor once the link is fully drawn.
+      const drawn = effectiveDrawProgress >= 1 ? 1 : 0;
+      failOverlay.opacity(timedFailureOpacity * drawn * (failOverlay.getAttr('failTintStrength') ?? 1));
     } else if (failEndsActive && isPlayingNow && renderData && progressForFail > 0 && progressForFail < 1) {
       const WIN = 0.08;
       const nearEnd = progressForFail >= (1 - WIN);
@@ -719,7 +744,7 @@ function applyLinkStateToId(layer, id, state, linkRenders, opts = {}, sourceId =
         token.x(point.x);
         token.y(point.y);
         token.opacity(1);
-        if (tokenLabel) tokenLabel.text((web?.displayText ?? '') || '');
+        if (tokenLabel) { tokenLabel.text((web?.displayText ?? '') || ''); tokenLabel.opacity(1); }
       }
     } else {
       // Manual per-link token timing (independent of variables)
@@ -729,8 +754,8 @@ function applyLinkStateToId(layer, id, state, linkRenders, opts = {}, sourceId =
         const { point } = getPointAtProgress(renderData, tokenProgress, true);
         token.x(point.x);
         token.y(point.y);
-        token.opacity(1);
-        if (tokenLabel) tokenLabel.text(web.displayText ?? '');
+        token.opacity(getTokenFadeIn(tNow - timing.start, timing.duration));
+        if (tokenLabel) { tokenLabel.text(web.displayText ?? ''); tokenLabel.opacity(1); }
       } else if (manual) {
         // When the link participates in a scrolling area, suppress manual tokens until
         // the first wrap after a reset. This prevents every manual token from firing
@@ -777,9 +802,9 @@ function applyLinkStateToId(layer, id, state, linkRenders, opts = {}, sourceId =
             const fadeDur = Math.min(0.18, mDur * 0.5);
             token.opacity(clamp(cycleElapsed / Math.max(0.0001, fadeDur), 0, 1));
             if (tokenLabel) {
-              tokenLabel.text(
-                getManualTokenTextAtTime(manual, manualTime).slice(0, manual.textMaxLength ?? 6)
-              );
+              const { text, opacity } = getManualTokenTextFadeAtTime(manual, manualTime);
+              tokenLabel.text(text.slice(0, manual.textMaxLength ?? 6));
+              tokenLabel.opacity(opacity);
             }
           } else {
             token.opacity(0);
@@ -800,11 +825,11 @@ function applyLinkStateToId(layer, id, state, linkRenders, opts = {}, sourceId =
             const { point } = getPointAtProgress(renderData, mp, true);
             token.x(point.x);
             token.y(point.y);
-            token.opacity(1);
+            token.opacity(getTokenFadeIn(manualTime - mStart, mDur));
             if (tokenLabel) {
-              tokenLabel.text(
-                getManualTokenTextAtTime(manual, manualTime).slice(0, manual.textMaxLength ?? 6)
-              );
+              const { text, opacity } = getManualTokenTextFadeAtTime(manual, manualTime);
+              tokenLabel.text(text.slice(0, manual.textMaxLength ?? 6));
+              tokenLabel.opacity(opacity);
             }
           } else {
             token.opacity(0);
@@ -854,6 +879,8 @@ function applyLinkStateToId(layer, id, state, linkRenders, opts = {}, sourceId =
       // Reveal the X as the draw/token front reaches the end, then keep it shown.
       const WIN = 0.08;
       setMark(progressForFail >= 1 ? 1 : (progressForFail - (1 - WIN)) / WIN);
+    } else if (timedFailure) {
+      setMark(timedFailureOpacity);
     } else if (isFailing) {
       // Static "failing" link: show the X once the link has drawn in.
       const drawn = state.progress ?? 1;
@@ -1265,7 +1292,7 @@ function resetNodeById(layer, id, isFailing = false) {
 
   const failTint = getCachedNode(layer, `#node-fail-tint-${id}`);
   if (failTint) {
-    failTint.opacity(isFailing ? 1 : 0);
+    failTint.opacity(isFailing ? (failTint.getAttr('failTintStrength') ?? 1) : 0);
   }
 
   // Area reset — restore rect to full dimensions and label to full opacity

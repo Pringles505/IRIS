@@ -8,6 +8,8 @@ import { getNodeDisplayText, getNodeTextFontFamily } from '../../text/equationTe
 import { snapDraggedBox } from './dragSnap';
 import NodeStatusMark, { getNodeStatusDash, getNodeStatusStroke, getNodeStatusTextColor } from './NodeStatusMark';
 import LinkFailureMark from './LinkFailureMark';
+import { getCustomShapeOutline } from '../../shapes/customShape';
+import { getLinkFailureStyle } from '../../animation/nodeFailureStyle';
 
 const PORT_R = 7;
 const PORT_POSITIONS = (w, h) => [
@@ -26,6 +28,11 @@ function renderNodeBody(node, stroke, strokeWidth, fill) {
     dash: getNodeStatusDash(node),
     dashEnabled: !!node.offline,
   };
+
+  if (node.shape === 'custom') {
+    const outline = getCustomShapeOutline(node.customShape, node.width, node.height);
+    if (outline) return <Line points={outline} closed {...common} />;
+  }
 
   if (node.shape === 'diamond') {
     return (
@@ -453,7 +460,8 @@ function MirrorShape({
         {binding.childLinks.map((link) => {
           const render = binding.linkRenders[link.id];
           if (!render) return null;
-          const linkColor = link.failing ? pageColors.dangerBright : link.stroke;
+          const linkFailStyle = getLinkFailureStyle(link);
+          const linkColor = link.failing && linkFailStyle.tint ? linkFailStyle.color : link.stroke;
           return (
             <Group
               key={link.id}
